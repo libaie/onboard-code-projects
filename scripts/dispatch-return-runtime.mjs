@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   mkdir,
   open,
@@ -96,8 +97,13 @@ const sha256 = (value) => createHash("sha256").update(value, "utf8").digest("hex
 const keysEqual = (value, fields) =>
   value && typeof value === "object" && !Array.isArray(value) &&
   Object.keys(value).sort().join("\0") === [...fields].sort().join("\0");
+const comparablePath = (value) => {
+  try { return realpathSync.native(resolve(value)); } catch { return resolve(value); }
+};
 const samePath = (left, right) =>
-  process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+  process.platform === "win32"
+    ? comparablePath(left).toLowerCase() === comparablePath(right).toLowerCase()
+    : comparablePath(left) === comparablePath(right);
 
 function defaultStatePath() {
   const codexRoot = process.env.CODEX_HOME || join(homedir(), ".codex");

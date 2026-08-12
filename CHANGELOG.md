@@ -19,3 +19,4 @@
 - Add LF checkout rules, real Node.js version preflight, clean-archive release gating, and executable Skill installer documentation.
 - Harden public packaging with an exact file allowlist, fail-closed history scanning, and private-path and credential-shape checks.
 - Reject embedded or encoded credential shapes at source and controller-state boundaries, and keep zero-repository replay limited to three documented transport failures.
+- Canonicalize filesystem aliases before comparing project and controller roots, including Windows 8.3 paths and migrated registries.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -214,9 +214,10 @@ test("sealed dispatch verification binds both hashes, registry identity, and phy
   const otherRoot = join(f.root, "other-project");
   try {
     await mkdir(otherRoot);
+    const physicalProjectRoot = await realpath(f.projectRoot);
     const verified = await verifyDispatch({
       statePath: f.statePath,
-      projectRoot: f.projectRoot,
+      projectRoot: physicalProjectRoot,
       dispatchJson: JSON.stringify(f.envelope),
     });
     const readback = await readDispatch({
@@ -233,7 +234,7 @@ test("sealed dispatch verification binds both hashes, registry identity, and phy
       rework: f.dispatch.rework,
       taskSpecHash: f.dispatch.taskSpecHash,
       dispatchHash: f.dispatch.dispatchHash,
-      projectRoot: f.projectRoot,
+      projectRoot: physicalProjectRoot,
     });
     assert.deepEqual(verified, {
       state: "dispatch-verified",
@@ -242,7 +243,7 @@ test("sealed dispatch verification binds both hashes, registry identity, and phy
       dispatchId: f.dispatch.dispatchId,
       taskSpecHash: f.dispatch.taskSpecHash,
       dispatchHash: f.dispatch.dispatchHash,
-      projectRoot: f.projectRoot,
+      projectRoot: physicalProjectRoot,
     });
 
     const changedTask = { ...f.envelope, taskSpec: { ...f.envelope.taskSpec, objective: "Changed" } };
@@ -534,6 +535,7 @@ test("the default registry stays inside the narrow onboarding state directory", 
 test("one durable wake worker survives schema migration and rejects duplicate creation", async () => {
   const root = await mkdtemp(join(tmpdir(), "onboard-wake-worker-"));
   const controllerRoot = join(root, "controller");
+  const controllerAlias = join(root, "controller-alias");
   const statePath = join(root, "runtime.json");
   const worker = {
     controllerRoot,
@@ -545,10 +547,11 @@ test("one durable wake worker survives schema migration and rejects duplicate cr
   };
   try {
     await mkdir(controllerRoot);
+    await symlink(controllerRoot, controllerAlias, process.platform === "win32" ? "junction" : "dir");
     await writeFile(statePath, `${JSON.stringify({
       schemaVersion: 1,
       controllers: [{
-        controllerRoot,
+        controllerRoot: controllerAlias,
         controllerThreadId: "controller-task",
         hostId: "local",
         dispatches: [],
