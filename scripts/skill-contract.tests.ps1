@@ -11,6 +11,7 @@ $skill = $skillRootDocument + "`n" + $controllerReference
 $skillPolicy = $skill
 $readme = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'README.md')
 $readmeZh = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'README.zh-CN.md')
+$contributing = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'CONTRIBUTING.md')
 $agentManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'agents\openai.yaml')
 $preflight = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'scripts\preflight.ps1')
 $initializer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'scripts\init-controller.ps1')
@@ -47,34 +48,46 @@ Assert-InOrder $readme @(
   '## Problems this Skill solves',
   '## What it creates',
   '## Quick start',
-  '## How isolation works',
-  '## Four-quadrant request intake'
+  '## Git URL onboarding',
+  '## How it works',
+  '## Requirements and diagnostics',
+  '## Permissions and local data',
+  '## Troubleshooting',
+  '## Documentation'
 ) 'English README must lead with pain points and the shortest usable journey'
 Assert-Contains $readme '(?is)## Problems this Skill solves.{0,4000}Context pollution.{0,700}Repository and baseline drift.{0,700}Task proliferation.{0,700}Lost completion signals.{0,700}Controller memory growth' `
   'English README must name the five primary multi-project pain points'
 Assert-Contains $readme '(?is)## Quick start.{0,7000}\$skill-installer.{0,1800}\$onboard-code-projects.{0,1800}sources:.{0,1800}controllerRoot' `
   'English README quick start must cover installation, project onboarding, and optional controller setup'
-$englishQuickStart = [regex]::Match($readme, '(?is)## Quick start(?<body>.*?)(?=## How isolation works)').Groups['body'].Value
+$englishQuickStart = [regex]::Match($readme, '(?is)## Quick start(?<body>.*?)(?=## Git URL onboarding)').Groups['body'].Value
 Assert-Contains $englishQuickStart '(?is)dispatchReturnMode:\s*foreground' 'A Skill-only English quick start must use foreground return without an installed Hook'
 if ($englishQuickStart -match '(?is)dispatchReturnMode:\s*receipts-and-wake') { throw 'A Skill-only English quick start must not require the plugin receipt runtime' }
 
 $zhPainHeading = [regex]::Unescape('## \u5b83\u89e3\u51b3\u4ec0\u4e48\u75db\u70b9')
 $zhCreatesHeading = [regex]::Unescape('## \u5b83\u4f1a\u521b\u5efa\u4ec0\u4e48')
 $zhQuickStartHeading = [regex]::Unescape('## \u5feb\u901f\u5f00\u59cb')
-$zhIsolationHeading = [regex]::Unescape('## \u9694\u79bb\u673a\u5236')
-$zhQuadrantHeading = [regex]::Unescape('## \u56db\u8c61\u9650\u8bf7\u6c42\u534f\u8bae')
+$zhGitHeading = [regex]::Unescape('## Git URL \u63a5\u5165')
+$zhHowHeading = [regex]::Unescape('## \u5de5\u4f5c\u65b9\u5f0f')
+$zhRequirementsHeading = [regex]::Unescape('## \u73af\u5883\u8981\u6c42\u4e0e\u53ea\u8bfb\u8bca\u65ad')
+$zhPermissionsHeading = [regex]::Unescape('## \u6743\u9650\u4e0e\u672c\u5730\u6570\u636e')
+$zhTroubleshootingHeading = [regex]::Unescape('## \u5e38\u89c1\u95ee\u9898')
+$zhDocsHeading = [regex]::Unescape('## \u6587\u6863')
 Assert-InOrder $readmeZh @(
   $zhPainHeading,
   $zhCreatesHeading,
   $zhQuickStartHeading,
-  $zhIsolationHeading,
-  $zhQuadrantHeading
+  $zhGitHeading,
+  $zhHowHeading,
+  $zhRequirementsHeading,
+  $zhPermissionsHeading,
+  $zhTroubleshootingHeading,
+  $zhDocsHeading
 ) 'Chinese README must lead with pain points and the shortest usable journey'
 Assert-Contains $readmeZh '(?is)## \u5b83\u89e3\u51b3\u4ec0\u4e48\u75db\u70b9.{0,4000}\u4e0a\u4e0b\u6587\u6c61\u67d3.{0,700}\u4ed3\u5e93\u4e0e\u57fa\u7ebf\u6f02\u79fb.{0,700}\u4efb\u52a1\u81a8\u80c0.{0,700}\u5b8c\u6210\u72b6\u6001\u4e22\u5931.{0,700}\u4e2d\u63a7\u8bb0\u5fc6\u81a8\u80c0' `
   'Chinese README must name the five primary multi-project pain points'
 Assert-Contains $readmeZh '(?is)## \u5feb\u901f\u5f00\u59cb.{0,7000}\$skill-installer.{0,1800}\$onboard-code-projects.{0,1800}sources:.{0,1800}controllerRoot' `
   'Chinese README quick start must cover installation, project onboarding, and optional controller setup'
-$chineseQuickStart = [regex]::Match($readmeZh, '(?is)## \u5feb\u901f\u5f00\u59cb(?<body>.*?)(?=## \u9694\u79bb\u673a\u5236)').Groups['body'].Value
+$chineseQuickStart = [regex]::Match($readmeZh, '(?is)## \u5feb\u901f\u5f00\u59cb(?<body>.*?)(?=## Git URL \u63a5\u5165)').Groups['body'].Value
 Assert-Contains $chineseQuickStart '(?is)dispatchReturnMode:\s*foreground' 'A Skill-only Chinese quick start must use foreground return without an installed Hook'
 if ($chineseQuickStart -match '(?is)dispatchReturnMode:\s*receipts-and-wake') { throw 'A Skill-only Chinese quick start must not require the plugin receipt runtime' }
 
@@ -107,17 +120,6 @@ foreach ($intakePolicy in @($skillPolicy, $controllerPolicy)) {
   Assert-Contains $intakePolicy '(?is)(not|never).{0,180}(new ledger schema|authorization source).{0,600}objective.{0,120}nonGoals.{0,120}acceptance.{0,160}taskSpec.{0,160}contract' `
     'Intake outcomes must reuse existing controller facts instead of creating another schema or authority source'
 }
-foreach ($intakeReadme in @($readme, $readmeZh)) {
-  Assert-InOrder $intakeReadme @(
-    'Shared known',
-    'User-known / agent-unknown',
-    'Agent-known / user-unknown',
-    'Shared unknown'
-  ) 'Both READMEs must explain the complete four-quadrant intake protocol'
-  Assert-Contains $intakeReadme '(?is)(at most|maximum).{0,80}three.{0,300}(assumption|assumptions).{0,300}(exploration version|exploratory version)' `
-    'Both READMEs must document the question budget and assumption fallback'
-}
-
 foreach ($path in @(
   'scripts\chain-store.tests.ps1',
   'scripts\dispatch-return-runtime.mjs',
@@ -147,14 +149,6 @@ foreach ($memoryPolicy in @($skillPolicy, $controllerPolicy)) {
     'Generated controller views must not be edited or treated as authoritative'
   Assert-Contains $memoryPolicy '(?is)Put.{0,500}ExpectedEntryHash.{0,200}MISSING.{0,500}ConfirmTerminal.{0,400}(immutable|terminal)' `
     'CHAIN writes must use exact CAS and explicit immutable terminal transition'
-}
-foreach ($memoryReadme in @($readme, $readmeZh)) {
-  Assert-Contains $memoryReadme '(?is)200.{0,160}25 KiB' `
-    'Both READMEs must document bounded startup memory, compact terminal index, and exact archived lookup'
-  Assert-Contains $memoryReadme '(?is)(at most|\u6700\u591a).{0,80}500' `
-    'Both READMEs must document the terminal summary bound'
-  Assert-Contains $memoryReadme '(?is)(?:-Action )?Get.{0,160}ChainId' `
-    'Both READMEs must document exact archived CHAIN lookup'
 }
 foreach ($initializerPath in @('.chain-store.json','tools\chain-store.ps1','memory\MEMORY.md','state\index.json','TASKS.md')) {
   Assert-Contains $initializer ([regex]::Escape($initializerPath)) "Initializer must manage $initializerPath"
@@ -482,12 +476,43 @@ Assert-Contains $preflight '(?is)--version.{0,1200}18\.0\.0.{0,1200}node>=18\.0\
   'Preflight must execute Node.js and enforce the documented minimum version'
 
 foreach ($document in @($readme, $readmeZh)) {
-  Assert-Contains $document '(?is)controller-thread-unknown.{0,1200}abandon|abandon.{0,1200}controller-thread-unknown' `
-    'Both READMEs must document controller-thread-unknown reconciliation'
+  if (($document -split "`r?`n").Count -gt 260) { throw 'Public README must remain a concise project overview (260 lines maximum)' }
+  if ($document -match '(?m)^## (?:Bounded convergence and reusable experience|Four-quadrant request intake|Long-lived controller memory|Results and recovery|Verification|\u6709\u754c\u6536\u655b\u4e0e\u7ecf\u9a8c\u590d\u7528|\u56db\u8c61\u9650\u8bf7\u6c42\u534f\u8bae|\u957f\u671f\u4e2d\u63a7\u8bb0\u5fc6|\u7ed3\u679c\u4e0e\u6062\u590d|\u9a8c\u8bc1)\s*$') {
+    throw 'Internal controller and maintainer details must not return to the public README'
+  }
+  Assert-Contains $document '(?is)controller-thread-unknown.{0,500}nextAction|nextAction.{0,500}controller-thread-unknown' `
+    'Both READMEs must give concise controller-thread-unknown recovery guidance'
   Assert-Contains $document '(?is)workflow isolation' 'Both READMEs must distinguish workflow isolation from sandboxing'
+  Assert-Contains $document 'references/controller-runtime\.md' 'Both READMEs must link the advanced controller runtime reference'
+  Assert-Contains $document 'SECURITY\.md' 'Both READMEs must link the security boundary'
   Assert-Contains $document 'release-checklist\.md' 'Both READMEs must link the release checklist'
   Assert-Contains $document 'CONTRIBUTING\.md' 'Both READMEs must link contribution guidance'
+  Assert-Contains $document '(?is)codebase-memory.{0,160}(required|\u5fc5\u9700)|(?:required|\u5fc5\u9700).{0,160}codebase-memory' `
+    'Both READMEs must state that codebase-memory is required for onboarding'
+  if ($document -match '(?i)safe cleanup guidance|\u5b89\u5168\u6e05\u7406\u65b9\u5f0f') {
+    throw 'README must not claim that SECURITY.md contains cleanup instructions it does not provide'
+  }
+  Assert-Contains $document '(?is)(durable result return|\u8010\u4e45\u7ed3\u679c\u56de\u4f20).{0,300}(Hook).{0,180}(Node.js|Node).{0,500}(automatic wake|\u81ea\u52a8\u5524\u9192).{0,300}(additional|extra|\u989d\u5916|\u8fd8\u9700\u8981)' `
+    'Both READMEs must distinguish durable receipts from the extra automatic-wake capabilities'
+  foreach ($internalMarker in @(
+    '\.codex-controller\.json',
+    'state/(?:active|archive|goals|experience-index|dispatch-receipts)',
+    '\bCAS\b',
+    '\bExportDispatch\b',
+    '\btaskSpecHash\b',
+    '\bCONVERGENCE_FAILED\b',
+    'controller-epoch-rotation-unsupported',
+    '\bgoal lineage\b',
+    '-ConfirmTerminal',
+    'chain-store\.ps1\s+-Action',
+    'mapped N/M'
+  )) {
+    if ($document -match $internalMarker) { throw "Public README contains internal implementation marker: $internalMarker" }
+  }
 }
+Assert-Contains $contributing 'docs/release-checklist\.md#deterministic-gate' `
+  'Contribution guidance must link the maintained deterministic test suite'
+if ($contributing -match 'README\.md#verification') { throw 'Contribution guidance must not link the removed README verification section' }
 Assert-Contains $skill '(?is)set-task-intent.{0,1200}(mutation protocol|final Read).{0,500}create_thread' `
   'Controller task creation must name the durable state adapter sequence before create_thread'
 Assert-Contains $skill '(?is)register-project.{0,500}(read back|readback|read-after-write)' `
@@ -596,16 +621,9 @@ foreach ($document in @($readme, $readmeZh)) {
     '-RequireLfs',
     'preflight.ps1 -RequireNode'
   )) { Assert-Contains $document ([regex]::Escape($diagnostic)) "Both READMEs must document diagnostic command $diagnostic" }
-  Assert-Contains $document '(?is)SelfTest.{0,240}Verification|Verification.{0,240}SelfTest' 'SelfTest must be described as verification-only'
-  if ([regex]::Matches($document, '(?is)fast.{0,160}moderate.{0,160}full').Count -lt 4) {
-    throw 'Each first-call journey must repeat the explicit fast/moderate/full confirmation'
-  }
-  if ([regex]::Matches($document, 'sources:').Count -lt 5) {
-    throw 'Both bind and abandon recovery examples must repeat the complete sources input'
-  }
-  foreach ($boundary in @('preflight', 'mapped N/M', 'task verified', 'index running', 'index ready', 'controller pending', 'controller ready')) {
-    Assert-Contains $document ([regex]::Escape($boundary)) "Both READMEs must document progress boundary $boundary"
-  }
+  Assert-Contains $document '(?is)fast.{0,160}moderate.{0,160}full' 'Both READMEs must explain the first-run index choices once'
+  Assert-Contains $document '(?is)needs-project-add.{0,500}(save|\u4fdd\u5b58).{0,500}(same request|\u76f8\u540c\u8bf7\u6c42)' `
+    'Both READMEs must explain the clone-first save-and-rerun journey'
 }
 Assert-Contains $skill '(?is)nextAction.{0,700}sources.{0,500}(exact local|local exact).{0,500}(credential-free|redacted)' `
   'Unknown-task recovery must carry complete safe replayable sources'
@@ -613,22 +631,6 @@ Assert-Contains $skill '(?is)nextAction.{0,1400}Git.{0,300}cloneRoot.{0,300}(bra
   'Git recovery must replay cloneRoot, ref identity, and LFS choice'
 Assert-Contains $skill '(?is)(bind and abandon|both recovery).{0,400}(same|identical).{0,300}(replay-safe|original request)' `
   'Bind and abandon must carry the same replay-safe original request inputs'
-Assert-Contains $readme '(?is)Project states include' 'README must describe project states, not call them reason codes'
-if ($readme -match '(?is)Project reasons include') { throw 'README misclassifies project states as reason codes' }
-if ($readme -match '(?is)Project states include.{0,500}reasonCode.{0,200}active state') { throw 'README must not claim a v1 project reasonCode' }
-foreach ($document in @($readme, $readmeZh)) {
-  Assert-Contains $document '(?is)Git.{0,500}recovery.{0,1000}cloneRoot.{0,300}(branch|ref).{0,300}fullLfsCheckout' `
-    'Both READMEs must explain complete Git recovery replay fields'
-  Assert-Contains $document '(?is)clone-first.{0,500}save.{0,500}same request.{0,500}(verified clone|verify the clone)' `
-    'Both READMEs must document clone-first save-and-rerun reuse'
-  Assert-Contains $document '(?is)v1.{0,500}blockReason.{0,500}registrationReasonCode' `
-    'Both READMEs must distinguish v1 blockReason from v2 registrationReasonCode'
-  Assert-Contains $document '(?is)clear-stale-controller.{0,500}replace-project-binding|replace-project-binding.{0,500}clear-stale-controller' `
-    'Both READMEs must document stale controller and project binding recovery'
-  Assert-Contains $document '(?is)controller-initialized.{0,300}createControllerTask=true' `
-    'Both READMEs must not tell controller-initialized users to save an already resolved project'
-}
-
 Assert-Contains $skill '(?is)target directory.{0,260}(already exists|exists).{0,500}actual root.{0,300}(credential-free|redacted).{0,200}origin.{0,300}(branch|ref).{0,200}(match|drift)' `
   'Existing clones may be reused only after exact root, origin, and ref validation'
 Assert-Contains $skill '(?is)(otherwise|mismatch).{0,160}blocked.{0,200}(not|never).{0,120}(overwrite|re-clone|clone again)' `
