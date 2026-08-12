@@ -1,0 +1,7 @@
+/.codex-controller.json
+/.codex-controller.*.tmp
+/.chain-store-migration.*/
+/legacy/
+/memory/MEMORY.md
+/state/
+/TASKS.md

@@ -1,0 +1,38 @@
+{
+  "name": "onboard-code-projects",
+  "version": "0.1.0",
+  "description": "Isolate related repositories in project-bound Codex tasks and coordinate durable cross-project dispatches.",
+  "author": {
+    "name": "libaie",
+    "url": "https://github.com/libaie"
+  },
+  "homepage": "https://github.com/libaie/onboard-code-projects",
+  "repository": "https://github.com/libaie/onboard-code-projects.git",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "codex-skill",
+    "multi-repo",
+    "multi-project",
+    "workflow-orchestration",
+    "codebase-memory",
+    "windows",
+    "controller",
+    "hooks"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Onboard Code Projects",
+    "shortDescription": "Isolate and coordinate related code projects",
+    "longDescription": "Create stable project-bound Codex tasks, keep repository context isolated, and coordinate cross-project work with durable dispatch receipts.",
+    "developerName": "libaie",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Write"
+    ],
+    "websiteURL": "https://github.com/libaie/onboard-code-projects",
+    "defaultPrompt": [
+      "Onboard these related repositories into isolated Codex project tasks."
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+interface:
+  display_name: "Onboard Code Projects"
+  short_description: "Isolate and coordinate related Codex projects"
+  default_prompt: "Use $onboard-code-projects to onboard the supplied repositories as verified project-bound local tasks, refresh codebase-memory indexes, and initialize or reconcile the optional generic controller only when explicitly authorized."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "codebase-memory"
+      description: "Codebase Memory MCP server"
+
+policy:
+  allow_implicit_invocation: false

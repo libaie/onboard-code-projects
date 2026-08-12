@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a sanitized onboarding or controller failure
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include secrets, repository contents, private paths, task messages, or raw tool output.
+  - type: input
+    id: environment
+    attributes:
+      label: Sanitized environment
+      description: Windows and PowerShell versions, Codex surface, and whether required capabilities were available. Do not include account or machine identifiers.
+    validations:
+      required: true
+  - type: input
+    id: outcome
+    attributes:
+      label: State and reason code
+      description: The public state and reasonCode, with identifiers removed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: Minimal steps using fictional paths and repositories. Do not paste source code or manifests.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true

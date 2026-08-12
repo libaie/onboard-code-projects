@@ -1,0 +1,10 @@
+.codebase-memory/
+.codex/
+state/
+memory/
+TASKS.md
+.chain-store-validation.*
+docs/superpowers/
+*.tmp
+Thumbs.db
+.DS_Store
