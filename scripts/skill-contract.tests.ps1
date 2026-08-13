@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$FocusedTaskSetReset)
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -43,6 +43,130 @@ function Assert-InOrder {
     $position = $next + $marker.Length
   }
 }
+
+function Assert-TaskSetResetContract {
+  $policyDocuments = @(
+    @{ Name = 'root Skill'; Text = $skillRootDocument },
+    @{ Name = 'controller runtime reference'; Text = $controllerReference },
+    @{ Name = 'generated controller policy'; Text = $controllerPolicy }
+  )
+  foreach ($document in $policyDocuments) {
+    $text = $document.Text
+    $name = $document.Name
+    Assert-Contains $text 'resetControllerTasks\s*=\s*true' "$name must require explicit reset authorization"
+    Assert-Contains $text '(?is)read-only\s+`?PlanTaskSetReset`?.{0,300}canonical\s+`?planHash`?.{0,300}must not call\s+`?PrepareCandidate`?' `
+      "$name must use a write-free adapter Plan without leaving a candidate"
+    Assert-Contains $text '(?is)separate\s+`?Apply\(planHash\)`?.{0,300}exact returned hash' `
+      "$name must require a separate Apply request with the exact canonical planHash"
+    Assert-Contains $text '(?is)(?:separate|independent).{0,240}coordinator task.{0,300}outside the scoped reset set.{0,1800}archived last' `
+      "$name must require a non-scoped coordinator and archive it last"
+    Assert-Contains $text '(?is)exact generated v3.{0,500}(?:custom|legacy).{0,300}store[- ]backed v2.{0,300}(?:unsupported|fail closed|capability unavailable)' `
+      "$name must expose reset only for exact generated v3 and fail closed for custom or store-backed adapters"
+    Assert-Contains $text '(?is)planHash.{0,300}binds exactly.{0,300}operationId.{0,200}fromTaskSetId.{0,300}(?:strictly derived|deterministic).{0,200}toTaskSetId.{0,300}coordinator identity.{0,300}old controller and project bindings.{0,300}target root.{0,300}creation operation ID.{0,300}(?:saved-project|saved project|codexProjectId).{0,200}host' `
+      "$name must bind only the stable authorized replacement scope into planHash"
+    Assert-Contains $text '(?is)planHash.{0,1000}(?:does not|must not).{0,120}(?:bind|include).{0,300}(?:summary|summaryHash).{0,300}historyDigest.{0,300}(?:quiescence|externalQuiescence).{0,300}(?:active CHAIN|CHAIN head).{0,300}(?:timestamp|observedAt)' `
+      "$name must exclude all dynamic Apply evidence from planHash"
+    Assert-Contains $text '(?is)Apply.{0,300}(?:fresh|re-read|resample).{0,500}(?:history|quiescence|CHAIN head).{0,500}(?:gate|audit|evidence)' `
+      "$name must collect dynamic evidence as an Apply gate and audit instead of user reauthorization"
+    Assert-Contains $text '(?is)historyDigest.{0,300}read_thread.{0,300}hasMore=false.{0,300}non-`?inProgress`?.{0,300}oldest to newest.{0,300}turnId,status,completedAt.{0,300}UTF-8 compact JSON.{0,200}SHA-256.{0,300}oldestTurnId.{0,200}newestTurnId.{0,200}turnCount.{0,200}eofComplete=true' `
+      "$name must define one reproducible closed historyDigest algorithm"
+    Assert-Contains $text '(?is)(?:Do not|Never).{0,160}message text.{0,120}tool output.{0,240}(?:digest|replacement prompt).{0,300}summaryHash' `
+      "$name must keep raw conversation content out of historyDigest and bind the summary separately"
+    Assert-Contains $text '(?is)Before prepare.{0,300}before the first archive.{0,300}before complete/unfreeze.{0,300}canonical store.{0,300}same head.{0,300}Never modify, mutate, or rebind a CHAIN' `
+      "$name must preserve CHAIN identity and revalidate canonical heads at every destructive boundary"
+    Assert-Contains $text '(?is)(?:freeze|frozen).{0,300}project bootstrap replacements first.{0,300}controller bootstrap replacement last.{0,500}standby.{0,300}(?:without|no).{0,160}(?:business summary|handoff)' `
+      "$name must create exact bootstrap replacements once without premature business handoff"
+    Assert-Contains $text '(?is)(?:fully read|paginate).{0,200}(?:sanitize|redact).{0,200}(?:pre-summarize|pre-summary).{0,200}old histor.{0,400}archive.{0,240}old project task.{0,300}old controller task' `
+      "$name must pre-summarize complete old history before freezing it"
+    Assert-Contains $text '(?is)(?:digest drift|history drift|drifted).{0,300}(?:re-summarize|rebuild).{0,240}(?:final complete|complete archived|final full).{0,160}histor.{0,300}(?:never|without).{0,120}(?:a )?delta' `
+      "$name must rebuild the final handoff from frozen full history rather than append a delta"
+    Assert-Contains $text '(?is)(?:persist|record).{0,240}final handoff.{0,300}(?:send|deliver).{0,240}(?:new tasks|new task).{0,300}(?:standby ack|standby acknowledgement).{0,300}runtime replacement prepare.{0,240}atomic whole-set manifest switch.{0,240}runtime replacement commit and exact readback.{0,300}manifest completion seal.{0,300}runtime fence completion.{0,300}RecoverTaskSetResetSeal.{0,300}(?:unfreeze|resume ordinary work).{0,300}archive the non-scoped coordinator last' `
+      "$name must persist and acknowledge final handoff before the forward-only cutover"
+    Assert-Contains $text '(?is)prepare-task-set-reset-fence.{0,300}before.{0,200}(?:manifest Apply|PrepareCandidate).{0,300}exact runtime readback.{0,300}initialEvidenceHash' `
+      "$name must acquire and audit the runtime fence before manifest Apply"
+    Assert-Contains $text '(?is)seal marker.{0,300}(?:blocks|freezes).{0,300}(?:controller|CHAIN).{0,120}(?:and|plus).{0,120}runtime.{0,300}complete-task-set-reset-fence.{0,300}exact final manifest hash.{0,300}RecoverTaskSetResetSeal.{0,300}(?:only|sole).{0,160}(?:unfreeze|release)' `
+      "$name must use one proof-gated unfreeze boundary across all stores"
+    Assert-Contains $text '(?is)(?:archive.{0,240}freez.{0,160}histor).{0,500}(?:never|without).{0,160}(?:delta handoff|incremental handoff|a delta)|(?:never|without).{0,160}(?:delta handoff|incremental handoff|a delta).{0,500}(?:history drift|frozen history|freezing history)' `
+      "$name must reject delta handoff and freeze old history before cutover"
+    Assert-Contains $text '(?is)initialEvidenceHash.{0,300}(?:Apply|initial).{0,300}(?:history|historyDigest).{0,300}quiescence.{0,300}(?:active CHAIN|CHAIN head).{0,500}finalEvidenceHash.{0,300}(?:archived|final).{0,300}(?:history|historyDigest).{0,300}quiescence.{0,300}(?:active CHAIN|CHAIN head)' `
+      "$name must bind initial and final closed execution evidence independently from planHash"
+    Assert-Contains $text '(?is)(?:evidence changes|changed evidence).{0,300}(?:recomputation|recompute|recalculate).{0,300}(?:record|audit).{0,300}(?:scope is unchanged|scope unchanged|same scope).{0,300}(?:do not|does not|without).{0,160}(?:new Plan|user reauthor)' `
+      "$name must recompute changed evidence without meaningless scope reauthorization"
+    Assert-Contains $text '(?is)(?:forged|fake).{0,200}(?:evidence|packet|hash).{0,300}(?:fail|reject)' `
+      "$name must fail closed on forged execution evidence"
+    Assert-Contains $text '(?is)Codex task-API readback packets.{0,200}audit evidence boundary.{0,300}local adapter.{0,300}closed packet.{0,200}recomputes its hash.{0,300}cannot cryptographically authenticate task APIs' `
+      "$name must state the task-API audit boundary without claiming local cryptographic authenticity"
+    Assert-Contains $text '(?is)(?:keep|reuse).{0,120}(?:receipt[- ]worker|worker).{0,120}automation unchanged|(?:receipt[- ]worker|worker).{0,120}(?:and|plus).{0,120}automation.{0,120}(?:reuse|unchanged)' `
+      "$name must reuse the existing worker and automation"
+    Assert-Contains $text '(?is)list_projects.{0,200}read_thread.{0,200}create_thread.{0,200}send_message_to_thread.{0,200}wait_threads.{0,200}set_thread_archived.{0,500}single-root.{0,300}(?:fail closed|instead of guessing cwd)' `
+      "$name must fail closed unless exact project task APIs and single-root identity are proven"
+    Assert-Contains $text '(?is)Restore the same paused heartbeat/automation only after completion readback.{0,300}never create a second worker or automation.{0,300}failure keeps that automation paused.{0,300}same operation' `
+      "$name must resume the reused automation only after truthful completion"
+    Assert-Contains $text '(?is)(?:initial|first) prompt.{0,300}creationOperationId.{0,300}(?:only|unique) marker|creationOperationId.{0,300}(?:initial|first) prompt.{0,300}(?:only|unique) marker' `
+      "$name must place one creation marker in each bootstrap initial prompt"
+    Assert-Contains $text '(?is)(?:client-only|empty|timed-out|timeout).{0,300}(?:never|do not|must never).{0,160}retry.{0,300}list_threads.{0,300}(?:saved project|codexProjectId).{0,200}(?:root|cwd).{0,200}host.{0,300}read_thread.{0,300}(?:initial user turn|first user turn).{0,200}marker' `
+      "$name must reconcile an unknown bootstrap creation through authoritative task evidence"
+    Assert-Contains $text '(?is)(?:zero|0).{0,100}(?:more than one|>1|multiple).{0,300}(?:frozen|unknown).{0,300}(?:one|unique).{0,240}(?:threadId|real task).{0,300}record the replacement' `
+      "$name must bind a bootstrap replacement only after one unique real task match"
+  }
+
+  Assert-Contains $skillRootDocument '(?is)Apply accepts only exact known pre-store v1 or pre-store v2.{0,700}store[- ]backed v2.{0,300}(?:unsupported|fail closed).{0,300}separately reviewed migration' `
+    'The Skill must limit legacy upgrade to known pre-store v1/v2 and fail closed for store-backed v2'
+
+  Assert-Contains $controllerReference '(?is)PlanTaskSetReset payload.{0,500}operationId.{0,100}fromTaskSetId.{0,100}toTaskSetId.{0,100}coordinator.{0,100}expectedController.{0,100}expectedProjectBindings.{0,100}targets' `
+    'The controller reference must publish the exact reset Plan payload'
+  foreach ($operation in @(
+    'prepare-task-set-reset','record-task-set-creation-issued','record-task-set-client-thread','record-task-set-replacement',
+    'record-task-set-bootstrap-proof','record-task-set-archive','record-task-set-final-evidence','record-task-set-standby-proof',
+    'record-task-set-runtime-prepared','switch-task-set','record-task-set-runtime-committed','complete-task-set-reset'
+  )) {
+    Assert-Contains $controllerReference ([regex]::Escape("${operation}:")) "The controller reference must publish the exact $operation payload"
+  }
+  foreach ($action in @('prepare-task-set-reset-fence','prepare-controller-replacement','read-controller-replacement','commit-controller-replacement','complete-task-set-reset-fence')) {
+    Assert-Contains $controllerReference ([regex]::Escape("${action}:")) "The controller reference must publish the exact runtime $action payload"
+  }
+
+  foreach ($document in @($readme, $readmeZh)) {
+    Assert-Contains $document '(?is)resetControllerTasks:\s*true.{0,900}Action:\s*Plan.{0,900}Action:\s*Apply.{0,300}planHash' `
+      'Both READMEs must show the explicit two-request reset trigger'
+    Assert-Contains $document '(?is)(?:separate coordinator task|\u72ec\u7acb coordinator \u4efb\u52a1)' `
+      'Both READMEs must require a separate reset coordinator'
+    Assert-Contains $document '(?is)(?:outside the set being replaced|\u88ab\u66ff\u6362\u96c6\u5408\u4e4b\u5916)' `
+      'Both READMEs must keep the reset coordinator outside the replaced set'
+    Assert-Contains $document '(?is)(?:archived last|\u6700\u540e\u5f52\u6863)' `
+      'Both READMEs must archive the reset coordinator last'
+    Assert-Contains $document '(?is)(?:exact generated v3|\u7cbe\u786e\u751f\u6210\u7684 v3)' `
+      'Both READMEs must name the exact generated v3 reset boundary'
+    Assert-Contains $document '(?is)(?:custom|\u81ea\u5b9a\u4e49).{0,120}(?:legacy|\u65e7\u7248).{0,160}(?:store[- ]backed v2|\u5df2\u6709\u72b6\u6001\u5b58\u50a8\u7684 v2)' `
+      'Both READMEs must name unsupported custom, legacy, and store-backed v2 controllers'
+    Assert-Contains $document '(?is)(?:block safely|fail closed|\u5b89\u5168\u963b\u65ad|\u5931\u8d25\u5173\u95ed)' `
+      'Both READMEs must describe the exact-v3 boundary and fail-closed behavior'
+    Assert-Contains $document '(?is)(?:standby|\u5f85\u547d\u4efb\u52a1).{0,500}(?:archives old tasks|freezes the complete old history|\u51bb\u7ed3\u65e7\u5386\u53f2).{0,500}(?:only then activates|\u540e\u624d\u6fc0\u6d3b)' `
+      'Both READMEs must summarize standby then archive-old-before-switch behavior'
+  }
+
+  $workflowText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot '.github\workflows\windows-tests.yml')
+  $releaseText = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $skillRoot 'docs\release-checklist.md')
+  foreach ($entry in @(
+    @{ Name = 'CI'; Text = $workflowText },
+    @{ Name = 'release checklist'; Text = $releaseText }
+  )) {
+    Assert-Contains $entry.Text 'task-set-reset\.tests\.ps1' "$($entry.Name) must run task-set-reset.tests.ps1"
+  }
+  Assert-Contains $preflight "'scripts/task-set-reset\.tests\.ps1'" 'Release package gate must include task-set-reset.tests.ps1'
+}
+
+Assert-TaskSetResetContract
+if ($FocusedTaskSetReset) {
+  Write-Output 'PASS skill-contract task-set-reset'
+  exit 0
+}
+
+if ($controllerPolicy -match '(?is)project lane.{0,80}exact `?projectTaskId`?') {
+  throw 'Generated controller policy must not claim that the goal lane schema stores projectTaskId'
+}
+Assert-Contains $controllerPolicy '(?is)goal lane.{0,160}(?:keyed|identified).{0,80}`?projectRoot`?.{0,240}sealed dispatch.{0,160}exact `?projectTaskId`?' `
+  'Generated controller policy must describe the actual goal-lane and sealed-dispatch identity boundary'
 
 Assert-InOrder $readme @(
   '## Problems this Skill solves',
@@ -216,8 +340,6 @@ foreach ($dispatchPolicy in @($effectiveControllerPolicy)) {
     'The sealed return route must bind one callback to the exact controller task'
   Assert-Contains $dispatchPolicy '(?is)(credential-file|credential file|credential locator).{0,300}(forbid|must not|never).{0,500}(opaque|capabilityRef|authorizationRef)' `
     'Controller dispatch must prohibit credential locators and carry only opaque capability references'
-  Assert-Contains $dispatchPolicy '(?is)(epoch|rotation).{0,500}controller-epoch-rotation-unsupported.{0,700}(never|do not).{0,300}(replace-controller|runtime replacement).{0,300}(archive|old task)' `
-    'Unsupported controller rotation must remain advisory and cannot be emulated by one-sided replacement'
   Assert-Contains $dispatchPolicy '(?is)Historical experience import.{0,900}materialPreconditions.{0,600}sourceChainId.{0,200}sourceEntryHash.{0,200}evidenceHash.{0,200}observedAt' `
     'Historical experience import must preserve reconstructable preconditions and canonical evidence'
   Assert-Contains $dispatchPolicy '(?is)ExperienceImport.{0,1800}ExpectedEntryHash.{0,300}(CAS|idempotent)' `
@@ -465,7 +587,7 @@ if (Test-Path -LiteralPath $workflowPath -PathType Leaf) {
   Assert-Contains $workflow 'windows-latest' 'CI must run on Windows'
   Assert-Contains $workflow 'actions/checkout@[0-9a-f]{40}' 'CI dependencies must use an immutable commit SHA'
   Assert-Contains $workflow '(?is)fetch-depth:\s*0.{0,160}persist-credentials:\s*false' 'The release privacy gate must receive full history without retaining push credentials'
-  foreach ($command in @('preflight.ps1 -SelfTest', 'preflight.tests.ps1', 'index-mode.tests.ps1', 'source-input.tests.ps1', 'chain-store.tests.ps1', 'dispatch-return-runtime.tests.mjs', 'init-controller.tests.ps1', 'control-state.tests.ps1', 'skill-size.tests.ps1', 'skill-contract.tests.ps1', 'preflight.ps1 -ReleaseGate')) {
+  foreach ($command in @('preflight.ps1 -SelfTest', 'preflight.tests.ps1', 'index-mode.tests.ps1', 'source-input.tests.ps1', 'chain-store.tests.ps1', 'dispatch-return-runtime.tests.mjs', 'init-controller.tests.ps1', 'control-state.tests.ps1', 'task-set-reset.tests.ps1', 'skill-size.tests.ps1', 'skill-contract.tests.ps1', 'preflight.ps1 -ReleaseGate')) {
     Assert-Contains $workflow ([regex]::Escape($command)) "CI must run $command"
   }
   if ($workflow -match '(?i)publish|quick_validate') { throw 'CI must not publish or assume the maintainer-only quick validator' }
@@ -508,6 +630,9 @@ foreach ($document in @($readme, $readmeZh)) {
     'mapped N/M'
   )) {
     if ($document -match $internalMarker) { throw "Public README contains internal implementation marker: $internalMarker" }
+  }
+  foreach ($resetInternalMarker in @('taskSetReset', 'replacementSetHash', 'split[- ]brain', 'prepare-reset', 'commit-reset')) {
+    if ($document -match "(?i)$resetInternalMarker") { throw "Public README contains reset state-machine mechanics: $resetInternalMarker" }
   }
 }
 Assert-Contains $contributing 'docs/release-checklist\.md#deterministic-gate' `

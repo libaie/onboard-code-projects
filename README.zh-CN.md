@@ -104,6 +104,23 @@ dispatchReturnMode: foreground
 全链路排查 H5 推广海报登录流程，涉及 H5、商城后端和会员服务。先只读排查，冻结共享接口契约，再把各仓库检查下发到已有项目入口，最后回传端到端证据。
 ```
 
+### 刷新长期运行的中控任务
+
+当中控及其项目入口任务需要使用新会话时，精确生成的 v3 支持可替换当前绑定的整组任务，并继承已核验的历史记录。请从被替换集合之外的独立 coordinator 任务触发；该任务最后归档。如果仍有工作未静默、无法完整读取任务历史，或中控属于自定义、旧版、已有状态存储的 v2，而不是精确生成的 v3，操作会安全阻断。
+
+```text
+resetControllerTasks: true
+Action: Plan
+
+# 检查返回的 planHash，再使用相同请求发送：
+Action: Apply
+planHash: <返回的 planHash>
+```
+
+Plan 不会写入，只授权稳定的替换范围；用户查看 Plan 期间即使任务历史变化，也无需重新批准。Apply 只接受返回的精确哈希，先创建不含业务摘要的待命任务，再完整核验并冻结旧历史，发送最终有界脱敏交接后才激活新任务组。系统不删除任务；如执行中断，只继续同一操作。高级行为与恢复方式见[中控运行时参考](./references/controller-runtime.md)。
+
+重置还要求 Codex 任务 API 可用，且每个替换目标都是根目录唯一的精确已保存项目；根目录有歧义或无法回读任务 cwd 时会安全阻断。
+
 ## Git URL 接入
 
 Git source 使用封闭的逐项目对象：
@@ -147,6 +164,7 @@ Skill 只克隆到 `cloneRoot` 的新子目录，随后返回 `needs-project-add
 | `controllerName` | 否 | 默认 `Multi-Project Control Center`。 |
 | `initializeController` | 否 | 授权初始化中控脚手架。 |
 | `createControllerTask` | 否 | 授权创建中控任务。 |
+| `resetControllerTasks` | 否 | 显式请求先安全 Plan，再替换当前中控任务组。 |
 | `dispatchReturnMode` | 否 | `foreground`、`native-callback`、`receipts` 或 `receipts-and-wake`。 |
 
 高级升级和恢复输入见[中控运行时参考](./references/controller-runtime.md)。

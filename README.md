@@ -104,6 +104,23 @@ After setup, send cross-project work to the controller in ordinary language:
 Trace the invitation login flow across the H5 client, commerce backend, and member service. Start read-only, freeze the shared interface contract, dispatch repository-specific checks to the existing project tasks, and report end-to-end evidence.
 ```
 
+### Refresh long-lived controller tasks
+
+When a controller and its project entry tasks need fresh conversations, exact generated v3 support can replace the current bound set while carrying forward verified history. Start this from a separate coordinator task outside the set being replaced; it is archived last. The reset blocks safely when work is not quiet, complete history cannot be read, or the controller is custom, legacy, store-backed v2, or otherwise not an exact generated v3 installation.
+
+```text
+resetControllerTasks: true
+Action: Plan
+
+# Review the returned planHash, then send the same request with:
+Action: Apply
+planHash: <returned planHash>
+```
+
+Plan does not write and authorizes only the stable replacement scope; changing task history while reviewing the Plan does not require another approval. Apply accepts only the exact returned hash, creates empty standby replacements, rechecks and freezes the complete old history, sends the final bounded sanitized handoff, and only then activates the new set. It deletes no task and resumes the same operation after interruption. See the [controller runtime reference](./references/controller-runtime.md) for advanced behavior and recovery.
+
+Reset also requires usable Codex task APIs and an exact single-root saved project for every replacement; ambiguous roots or an unprovable task cwd block safely.
+
 ## Git URL onboarding
 
 Git sources use a closed per-source object:
@@ -147,6 +164,7 @@ Detailed queue, recovery, convergence, receipt, and controller-state contracts l
 | `controllerName` | No | Defaults to `Multi-Project Control Center`. |
 | `initializeController` | No | Authorizes controller scaffold initialization. |
 | `createControllerTask` | No | Authorizes controller task creation. |
+| `resetControllerTasks` | No | Explicitly requests a safe Plan before replacing the current controller task set. |
 | `dispatchReturnMode` | No | `foreground`, `native-callback`, `receipts`, or `receipts-and-wake`. |
 
 Advanced upgrade and reconciliation inputs are documented in [the controller runtime reference](./references/controller-runtime.md).

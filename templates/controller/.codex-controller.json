@@ -1,1 +1,1 @@
-{"schemaVersion":2,"generator":"onboard-code-projects","templateVersion":2,"controllerName":__CONTROLLER_NAME_JSON__,"controllerBinding":null,"controllerTaskIntent":null,"projectBindings":[],"dispatchQueues":[]}
+{"schemaVersion":3,"generator":"onboard-code-projects","templateVersion":3,"controllerName":__CONTROLLER_NAME_JSON__,"controllerBinding":null,"controllerTaskIntent":null,"projectBindings":[],"dispatchQueues":[],"taskSetId":__TASK_SET_ID_JSON__,"taskSetReset":null}

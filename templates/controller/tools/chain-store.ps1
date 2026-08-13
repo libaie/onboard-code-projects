@@ -932,12 +932,29 @@ function Read-Index {
 
 function Enter-StoreLock {
   param([string]$Root)
-  $name='Local\onboard-chain-store-'+(Get-HashText $Root.ToUpperInvariant())
+  $name='Local\onboard-code-projects-'+(Get-HashText $Root.ToUpperInvariant())
   $mutex=New-Object Threading.Mutex($false,$name);$acquired=$false
   try { $acquired = $mutex.WaitOne(5000) }
   catch [Threading.AbandonedMutexException] { $acquired = $true }
   if(-not$acquired){$mutex.Dispose();Throw-StoreError 3 'store-lock-timeout' 'Another controller writer holds the store lock'}
   return $mutex
+}
+
+function Assert-CanonicalWriteAllowed {
+  param([string]$Root)
+  if(Test-Path -LiteralPath (Join-Path (Join-Path $Root $script:StateName) '.task-set-reset-seal.json')){Throw-StoreError 1 'store-task-set-reset-seal-recovery-required' 'Task-set reset seal recovery is required before canonical CHAIN writes'}
+  $path=Join-Path $Root '.codex-controller.json'
+  if(-not(Test-Path -LiteralPath $path)){return}
+  $item=Get-Item -Force -LiteralPath $path
+  if($item.PSIsContainer-or($item.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne0){Throw-StoreError 2 'store-controller-manifest-invalid' 'Controller manifest must be a regular file'}
+  $read=Read-StrictJson $path 8MB 'store-controller-manifest-invalid';$manifest=$read.Object;$version=Get-PropertyValue $manifest 'schemaVersion';$names=@(Get-Names $manifest)
+  if($manifest-is[Array]-or$manifest-is[string]-or$version-isnot[int]-or$version-lt1-or($version-ge3-and$names-cnotcontains'taskSetReset')){Throw-StoreError 2 'store-controller-manifest-invalid' 'Controller manifest reset state is invalid'}
+  if($names-cnotcontains'taskSetReset'){return}
+  $reset=Get-PropertyValue $manifest 'taskSetReset'
+  if($null-eq$reset){return}
+  $phase=Get-PropertyValue $reset 'phase'
+  if($reset-is[Array]-or$reset-is[string]-or$phase-isnot[string]-or[string]::IsNullOrWhiteSpace($phase)){Throw-StoreError 2 'store-controller-manifest-invalid' 'Controller manifest reset state is invalid'}
+  if($phase-cne'completed'){Throw-StoreError 1 'store-task-set-reset-in-progress' 'Canonical CHAIN writes are frozen during task-set reset'}
 }
 
 function Exit-StoreLock {
@@ -1072,6 +1089,7 @@ try{
   if($Action-ceq'Initialize'){
     $mutex=Enter-StoreLock $root
     try{
+      Assert-CanonicalWriteAllowed $root
       $configPath=Join-Path $root $script:ConfigName
       if(Test-Path -LiteralPath $configPath){$configInfo=Read-Config $root}else{$config=Get-DefaultConfig;Write-AtomicText $configPath (($config|ConvertTo-Json -Depth 10 -Compress)+"`n");$configInfo=Test-Config $config $root}
       [IO.Directory]::CreateDirectory((Join-Path (Join-Path $root $script:StateName) 'active'))|Out-Null;[IO.Directory]::CreateDirectory((Join-Path (Join-Path $root $script:StateName) 'archive'))|Out-Null;[IO.Directory]::CreateDirectory((Join-Path (Join-Path $root $script:StateName) $script:GoalDirectoryName))|Out-Null
@@ -1097,6 +1115,7 @@ try{
     if($validated.Record.state -ceq 'terminal'-and -not $ConfirmTerminal){Throw-StoreError 2 'terminal-confirmation-required' 'Terminal transition requires -ConfirmTerminal'}
     $mutex=Enter-StoreLock $root
     try{
+      Assert-CanonicalWriteAllowed $root
       $snapshot=Get-StoreSnapshot $root -MaxRecentTerminal $configInfo.Config.maxDashboardItems;$current=@($snapshot.Heads|Where-Object{$_.ChainId -ceq $ChainId}|Select-Object -First 1)
       if($current.Count -eq 1-and $current[0].RecordHash -ceq $validated.Hash){Write-StoreResult applied 'task-replay' $root $ChainId $current[0].HeadHash $current[0].HeadHash $null ([pscustomobject]@{path=$current[0].Path;eventCount=$current[0].Count}) 'No change; the exact current record was already applied.' @() 0}
       if($current.Count -eq 0){if($ExpectedEntryHash -ine 'MISSING'){Throw-StoreError 1 'task-head-conflict' 'Task does not exist at the expected head'};if($validated.Record.state -cne 'active'){Throw-StoreError 1 'task-terminal-create' 'A new task must start active'}}
@@ -1137,6 +1156,7 @@ try{
     if($validated.Record.state-ceq'terminal'-and-not$ConfirmTerminal){Throw-StoreError 2 'terminal-confirmation-required' 'Goal terminal transition requires -ConfirmTerminal'}
     $mutex=Enter-StoreLock $root
     try{
+      Assert-CanonicalWriteAllowed $root
       $goalSnapshot=Get-GoalSnapshot $root;[void](Read-ExperienceIndex $root $goalSnapshot);$current=@($goalSnapshot.Heads|Where-Object{$_.GoalLineageId-ceq$GoalLineageId}|Select-Object -First 1)
       if($current.Count-eq1-and$current[0].RecordHash-ceq$validated.Hash){$data=[pscustomobject][ordered]@{path=$current[0].Path;eventCount=$current[0].Count;record=$current[0].Record};Write-StoreResult applied 'goal-replay' $root $null $current[0].HeadHash $current[0].HeadHash $goalSnapshot.Watermark $data 'No change; the exact current goal record was already applied.' @() 0}
       if($current.Count-eq0){
@@ -1170,6 +1190,7 @@ try{
     if($candidateFull.StartsWith((Join-Path $root $script:StateName)+'\',[StringComparison]::OrdinalIgnoreCase)-or$candidateFull-ieq(Join-Path $root $script:ConfigName)-or$candidateFull-ieq$configInfo.Memory-or$candidateFull-ieq$configInfo.Dashboard){Throw-StoreError 2 'candidate-path-invalid' 'Experience candidate cannot be canonical or derived state'}
     $candidateRead=Read-StrictJson $candidateFull $script:MaxRecordBytes 'candidate-encoding-invalid';$validated=Convert-ExperienceImportRecord $root $candidateRead.Object;$mutex=Enter-StoreLock $root
     try{
+      Assert-CanonicalWriteAllowed $root
       $imports=Get-ExperienceImportSnapshot $root;$sameId=@($imports.Records|Where-Object{$_.importId-ceq$validated.Record.importId})
       if($sameId.Count-gt0){$existingJson=ConvertTo-CanonicalRecord $sameId[0];if((Get-HashText $existingJson)-ceq$validated.Hash){$goalSnapshot=Get-GoalSnapshot $root;$data=[pscustomobject][ordered]@{path=$imports.Path;eventCount=$imports.Count;record=$sameId[0]};Write-StoreResult applied 'experience-import-replay' $root $null $imports.HeadHash $imports.HeadHash $goalSnapshot.Watermark $data 'No change; this exact curated import already exists.' @() 0};Throw-StoreError 1 'experience-import-duplicate' 'Import identity already exists with different content'}
       if(($imports.Count-eq0-and$ExpectedEntryHash-ine'MISSING')-or($imports.Count-gt0-and$ExpectedEntryHash-cne$imports.HeadHash)){Throw-StoreError 1 'experience-import-head-conflict' 'Experience import head changed'}
@@ -1184,7 +1205,7 @@ try{
   }
   if($Action-ceq'Verify'-or$Action-ceq'Rebuild'){
     $configInfo=Read-Config $root;$mutex=$null;if($Action-ceq'Rebuild'){$mutex=Enter-StoreLock $root}
-    try{$snapshot=Get-StoreSnapshot $root -RepairLayout:($Action-ceq'Rebuild') -MaxRecentTerminal $configInfo.Config.maxDashboardItems;$bytes=Get-ViewBytes $snapshot.Index $configInfo;$goalSnapshot=Get-GoalSnapshot $root -RepairLayout:($Action-ceq'Rebuild');$experienceBytes=Get-ExperienceBytes $goalSnapshot
+    try{if($Action-ceq'Rebuild'){Assert-CanonicalWriteAllowed $root};$snapshot=Get-StoreSnapshot $root -RepairLayout:($Action-ceq'Rebuild') -MaxRecentTerminal $configInfo.Config.maxDashboardItems;$bytes=Get-ViewBytes $snapshot.Index $configInfo;$goalSnapshot=Get-GoalSnapshot $root -RepairLayout:($Action-ceq'Rebuild');$experienceBytes=Get-ExperienceBytes $goalSnapshot
       if($Action-ceq'Rebuild'){[void](Write-Derived $root $snapshot $configInfo);Write-GoalDerived $root $goalSnapshot;$marker=Join-Path (Join-Path $root $script:StateName) $script:MarkerName;if(Test-Path -LiteralPath $marker -PathType Leaf){[IO.File]::Delete($marker)}}
       else{if(Test-Path -LiteralPath (Join-Path (Join-Path $root $script:StateName) $script:MarkerName)){Throw-StoreError 1 'store-rebuild-required' 'A prior canonical write requires Rebuild'};foreach($pair in @(@((Join-Path (Join-Path $root $script:StateName) $script:IndexName),$bytes.Index),@((Join-Path (Join-Path $root $script:StateName) $script:ExperienceIndexName),$experienceBytes),@($configInfo.Memory,$bytes.Memory),@($configInfo.Dashboard,$bytes.Dashboard))){if(-not(Test-Path -LiteralPath $pair[0] -PathType Leaf)-or(Get-HashBytes([IO.File]::ReadAllBytes($pair[0])))-cne(Get-HashBytes([byte[]]$pair[1]))){Throw-StoreError 1 'store-derived-mismatch' "Derived file mismatch: $($pair[0])"}}}
     }finally{Exit-StoreLock $mutex}
@@ -1199,9 +1220,10 @@ try{
   }
   if($Action-ceq'ApplyMigration'){
     if(-not$ConfirmMigration-or[string]::IsNullOrWhiteSpace($MigrationPath)-or-not(Test-Hash $ExpectedSourceHash)){Throw-StoreError 2 'migration-confirmation-required' 'ApplyMigration requires exact path/hash and -ConfirmMigration'}
-    if((Test-Path -LiteralPath (Join-Path $root $script:ConfigName)) -or (Test-Path -LiteralPath (Join-Path $root $script:StateName))){Throw-StoreError 1 'store-already-initialized' 'Controller already has a chain store'}
     $mutex=Enter-StoreLock $root;$movedState=$false;$installedConfig=$false;$verified=$null;$backup=$null
     try{
+      Assert-CanonicalWriteAllowed $root
+      if((Test-Path -LiteralPath (Join-Path $root $script:ConfigName)) -or (Test-Path -LiteralPath (Join-Path $root $script:StateName))){Throw-StoreError 1 'store-already-initialized' 'Controller already has a chain store'}
       $verified=Verify-Migration $root $MigrationPath $ExpectedSourceHash
       $backup=Join-Path (Join-Path $root 'legacy') (([DateTimeOffset]::Now.ToString('yyyyMMdd-HHmmss'))+'-'+$ExpectedSourceHash.Substring(0,8));[IO.Directory]::CreateDirectory($backup)|Out-Null
       foreach($file in $verified.Manifest.files){$source=Join-Path $root ([string]$file.relativePath).Replace('/','\');$destination=Join-Path $backup ([string]$file.relativePath).Replace('/','\');[IO.Directory]::CreateDirectory((Split-Path -Parent $destination))|Out-Null;[IO.File]::Copy($source,$destination,$false);if((Get-HashBytes([IO.File]::ReadAllBytes($destination)))-cne$file.hash){Throw-StoreError 3 'migration-backup-failed' 'Legacy backup hash mismatch'}}

@@ -11,12 +11,13 @@ Read this file completely before any controller initialization, upgrade, dispatc
 - [Convergence and cancellation](#convergence-and-cancellation)
 - [Durable receipts and wake worker](#durable-receipts-and-wake-worker)
 - [Controller initialization and memory](#controller-initialization-and-memory)
+- [Controller task-set reset](#controller-task-set-reset)
 - [Controller task lifecycle and reconciliation](#controller-task-lifecycle-and-reconciliation)
 - [Registration and result schema](#registration-and-result-schema)
 
 ## Dispatch queues and model routing
 
-For a generated v2 controller, persist every dispatch through the state adapter. `enqueue-dispatch` creates an exact idempotent record with `modelClass=economy|balanced|frontier`; each project has one active item and a bounded FIFO of at most 100 pending items. The same project's later tasks wait in FIFO order, while independent projects continue in parallel. `start-next-dispatch` starts only the head and acquires its write lease. Use only the adapter operations listed below; do not recreate this queue in prose or conversation memory. An unfinished active item retains its lease and prevents only the same project's next item from starting.
+For a generated controller, persist every dispatch through the state adapter. `enqueue-dispatch` creates an exact idempotent record with `modelClass=economy|balanced|frontier`; each project has one active item and a bounded FIFO of at most 100 pending items. The same project's later tasks wait in FIFO order, while independent projects continue in parallel. `start-next-dispatch` starts only the head and acquires its write lease. Use only the adapter operations listed below; do not recreate this queue in prose or conversation memory. An unfinished active item retains its lease and prevents only the same project's next item from starting.
 
 Route `economy` to bounded documentation, mechanical known diffs, and routine checks; `balanced` to normal single-project investigation, fixes, features, and tests; `frontier` to cross-project contracts, security/financial correctness, architecture rebaseline, or unresolved root-cause ambiguity. Record the class and reason, resolve the concrete available model at dispatch time, and escalate only when new evidence crosses a boundary—not because a task waited or a review produced another example.
 
@@ -84,13 +85,61 @@ The receipt worker invokes the exact absolute path of the installed trusted Skil
 
 ## Controller initialization and memory
 
-When `controllerRoot` is present, read this reference before controller action. When `initializeController=true`, require an existing empty directory or create only the exact authorized final path. Run `scripts/init-controller.ps1 -ControllerRoot <root>` and report its JSON. When `upgradeController=true`, use the initializer's upgrade mode only at a proved quiescent safe point and preserve state. When both flags are false, detect and verify a generated adapter, or preserve a legacy adapter only under its explicit trusted instructions. Never scaffold over unknown state.
+When `controllerRoot` is present, read this reference before controller action. When `initializeController=true`, require an existing empty directory or create only the exact authorized final path. Run `scripts/init-controller.ps1 -ControllerRoot <root>` and report its JSON. When `upgradeController=true`, upgrade only exact known pre-store v1 or pre-store v2 managed bytes at a proved quiescent safe point. Store-backed v2, custom v2, edited legacy, and unknown inventories fail closed and require a separately reviewed migration. When both flags are false, detect and verify a generated adapter, or preserve a legacy adapter only under its explicit trusted instructions. Never scaffold over unknown state.
 
 Generated controllers use two authoritative stores. `.codex-controller.json`, through `control-state.ps1`, owns task identity, bindings, queues, and leases. Hash-chained JSONL through `chain-store.ps1` owns CHAIN and goal audit history. Markdown and conversation history are not authoritative.
 
 At startup read only `memory/MEMORY.md`, then `chain-store.ps1 -Action Read`. Load exact CHAIN, queue, and contract entries only for a concrete action. Use `Get` for one archived CHAIN. Mutate CHAIN records only through `Put` with expected entry hash and terminal confirmation. Exact replay is idempotent; stale CAS fails; terminal history is immutable. Never edit derived indexes or canonical logs directly. Run Verify for integrity; Rebuild only after a verified derived mismatch.
 
-The memory summary is capped at 200 lines and 25 KiB. Terminal CHAINs move to monthly archives. Evaluate epoch rotation after 90 days or 500 additional terminals, but treat rotation as advisory and return `controller-epoch-rotation-unsupported` until the installed state adapter exposes and tests one atomic expected-old controller-binding replacement with a durable rotation intent across the controller manifest and return registry. Never emulate rotation by clearing the old binding, never call runtime `replace-controller` alone, and never archive the old task. Even after that operation exists, rotation still requires explicit authorization and zero active dispatches, pending items, leases, receipts, and creation/reconciliation intents.
+The memory summary is capped at 200 lines and 25 KiB. Terminal CHAINs move to monthly archives.
+
+## Controller task-set reset
+
+Task-set reset is available only when the installed controller is an exact generated v3 controller and its exact installed controller-state and return-runtime adapters pass this contract. Generated v1/v2, custom, legacy, and store-backed v2 adapters are unsupported and fail closed with `controller-capability-unavailable`; never emulate reset with one-sided state replacement. The user must explicitly set `resetControllerTasks=true`. A separate coordinator task outside the scoped reset set executes the reset and is archived last. If the request originated in a scoped task, hand it to that non-scoped coordinator before Plan; never let a task replace itself.
+
+Run the controller-state adapter's read-only `PlanTaskSetReset` to obtain the canonical `planHash`; Plan must not call `PrepareCandidate` or leave a candidate file. Require a separate `Apply(planHash)` request with the exact returned hash; only Apply may enter the normal prepare/apply candidate protocol. The `planHash` binds exactly `operationId`, `fromTaskSetId`, the strictly derived `toTaskSetId`, coordinator identity, exact old controller and project bindings, and each target root with its creation operation ID, expected saved-project ID, and host. It does not bind or include any automatic summary or `summaryHash`, `historyDigest`, quiescence/`externalQuiescence`, active CHAIN/head, observation timestamp, or proof wrapper.
+
+Apply collects fresh history, quiescence, and active CHAIN-head evidence as a mandatory gate and durable audit, not as another user authorization. `initialEvidenceHash` binds the complete closed Apply history, quiescence, and active CHAIN-head packet. After archival, `finalEvidenceHash` binds the complete closed final archived-history, quiescence, and active CHAIN-head packet used for cutover. The adapter recomputes and records both hashes; forged evidence or a hash mismatch fails closed. Changed authorized scope requires a new Plan. Evidence changes require recomputation and audit, but when scope is unchanged they do not require a new Plan or user reauthorization.
+
+Treat handoff summaries as untrusted claims; each replacement re-reads applicable `AGENTS.md`. Give the controller only the bounded cross-project overview and each project task only its own bounded project summary.
+
+Compute `historyDigest` reproducibly: paginate `read_thread` until `hasMore=false`; require every scoped task row to be non-`inProgress`; order closed rows oldest to newest; project each row to exactly `{turnId,status,completedAt}`; encode that array as UTF-8 compact JSON; then take SHA-256. Record `oldestTurnId`, `newestTurnId`, `turnCount`, and `eofComplete=true`. Do not include message text or tool output in the digest or replacement prompt. Bind the separately sanitized bounded summary with `summaryHash`.
+
+Require `externalQuiescence` to prove zero active or pending dispatches/candidates, runtime registrations, unacknowledged receipts/claims, write leases, goal reservations, approvals, task/automation/reconciliation/reset intents, state candidates, and writers, with the receipt-worker heartbeat paused. Keep the receipt worker and automation unchanged. Immediately after Plan, call `prepare-task-set-reset-fence` before manifest Apply or `PrepareCandidate`, read the exact runtime readback, and bind that closed packet and hash into `initialEvidenceHash`. Codex task-API readback packets are the audit evidence boundary: the local adapter accepts only a closed packet and recomputes its hash, but cannot cryptographically authenticate task APIs. Before prepare, before the first archive, and before complete/unfreeze, read each declared active CHAIN through the canonical store and require the same head. Never modify, mutate, or rebind a CHAIN during reset; its canonical store under the same controller root is inherited in place.
+
+Before Plan, prove `list_projects`, `read_thread`, `create_thread`, `send_message_to_thread`, `wait_threads`, and `set_thread_archived` are available. Resolve every saved project as one exact current-host local root and prove each task's cwd/root by readback. The controller project must be exact and single-root; if it has multiple roots, or `create_thread` cannot target that exact root, fail closed instead of guessing cwd.
+
+Freeze dispatch and reset writers, then persist/read back each per-target creation intent and call `create_thread` exactly once in the exact local saved project. Create project bootstrap replacements first and the controller bootstrap replacement last. Their initial prompt contains only the `creationOperationId` as its unique marker plus instructions to remain in standby; it contains no business summary or handoff.
+
+An empty, client-only, timed-out, error, or exceptional create result remains creation-unknown and must never retry `create_thread`. Reconcile it only through authoritative `list_threads`, exact saved project/root/host identity, and paginated `read_thread` proof that the initial user turn contains that unique marker. Zero or more than one match stays frozen and unknown. Only one matched real `threadId` may record the replacement.
+
+Use one forward-only operation: verify every bootstrap replacement is in standby -> fully read, sanitize, and pre-summarize old histories -> archive/read back every old project task, then the old controller task, freezing history -> compare the archived-history digest -> if it drifted, re-summarize the final complete archived history, never a delta handoff -> persist the final handoff -> send it to the new tasks and read back each standby acknowledgement -> runtime replacement prepare -> atomic whole-set manifest switch -> runtime replacement commit and exact readback -> manifest completion seal -> runtime fence completion with the exact final manifest hash -> `RecoverTaskSetResetSeal` and resume ordinary work -> archive the non-scoped coordinator last. The seal marker blocks controller and CHAIN writes, and the completed runtime fence blocks runtime mutations; `complete-task-set-reset-fence` requires the marker and exact final manifest hash, and `RecoverTaskSetResetSeal` is the only unfreeze and release boundary. Recovery rebuilds the final summary from complete archived history. Restore the same paused heartbeat/automation only after completion readback; never create a second worker or automation. After Apply starts there is no cancel path: a failure keeps that automation paused and remains frozen while the same operation resumes only its missing phase; never report completion early, roll back the switched set, start another reset, retry an unknown creation, delete a task, or release unproved state.
+
+The reset protocol is closed. Every controller-state mutation uses the normal candidate CAS protocol; an exact replay is a no-op even after the phase advances, while a third identity or changed evidence is a conflict. Shared packets are exact: a handoff is `{summary,summaryHash,oldestTurnId,newestTurnId,turnCount,historyDigest,eofComplete,observedAt}`, an active CHAIN head is `{chainId,expectedEntryHash}`, and a target selector is `{kind,projectRoot}`. Exact adapter payloads are:
+
+- `PlanTaskSetReset payload: operationId, fromTaskSetId, toTaskSetId, coordinator, expectedController, expectedProjectBindings, targets`; each Plan target is `{kind,projectRoot,creationOperationId,expectedCodexProjectId,expectedHostId}`.
+- `prepare-task-set-reset: operationId, planHash, initialEvidenceHash, fromTaskSetId, toTaskSetId, coordinator, expectedController, expectedProjectBindings, targets, initialActiveChains, initialExternalQuiescence, preparedAt`; each target adds `handoff` to its Plan fields.
+- `record-task-set-creation-issued: operationId, kind, projectRoot, creationOperationId, issuedAt`.
+- `record-task-set-client-thread: operationId, kind, projectRoot, clientThreadId`.
+- `record-task-set-replacement: operationId, kind, projectRoot, threadId, codexProjectId, hostId`.
+- `record-task-set-bootstrap-proof: operationId, kind, projectRoot, bootstrapProof`.
+- `record-task-set-archive: operationId, kind, snapshot, snapshotHash, archivedAt`.
+- `record-task-set-final-evidence: operationId, targets, activeChains, externalQuiescence, archives, finalEvidenceHash, finalizedAt`; each target is `{kind,projectRoot,handoff}`.
+- `record-task-set-standby-proof: operationId, kind, projectRoot, standbyProof`.
+- `record-task-set-runtime-prepared: operationId, runtimeReadback, runtimeReadbackHash`.
+- `switch-task-set: operationId, replacementSetHash, runtimePrepareToken, switchedAt`.
+- `record-task-set-runtime-committed: operationId, runtimeReadback, runtimeReadbackHash`.
+- `complete-task-set-reset: operationId, completedAt`.
+
+The installed return runtime has these exact reset actions; optional timestamps shown in brackets default once and exact replay returns the stored value:
+
+- `prepare-task-set-reset-fence: controllerRoot, operationId, planHash, manifestExpectedHash[, preparedAt]`.
+- `prepare-controller-replacement: controllerRoot, operationId, replacementSetHash, oldControllerThreadId, oldHostId, newControllerThreadId, newHostId, manifestPreparedHash[, preparedAt]`.
+- `read-controller-replacement: controllerRoot`.
+- `commit-controller-replacement: controllerRoot, operationId, replacementSetHash, oldControllerThreadId, oldHostId, newControllerThreadId, newHostId, manifestPreparedHash, preparedAt, prepareToken, manifestSwitchedHash[, committedAt]`.
+- `complete-task-set-reset-fence: controllerRoot, operationId, completedManifestHash[, completedAt]`; it requires the canonical seal marker and the exact current manifest hash.
+
+After the final runtime readback, call controller-state `RecoverTaskSetResetSeal` with exactly `{runtimeReadback,runtimeReadbackHash}`. Calling it without a payload may finish an interrupted history/manifest seal but deliberately retains the marker and returns runtime-pending; only the exact completed runtime packet removes the marker.
 
 ## Controller task lifecycle and reconciliation
 

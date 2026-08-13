@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
   mkdir,
+  link,
   open,
   readFile,
   readdir,
@@ -13,13 +14,15 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const UTC_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?(?:Z|\+00:00)$/;
 const TERMINAL_STATES = new Set(["completed", "blocked", "auth-required", "cancelled", "convergence-failed"]);
 const ENVELOPE_FIELDS = [
   "chainId",
@@ -34,7 +37,9 @@ const ENVELOPE_FIELDS = [
 const REGISTRY_FIELDS = ["schemaVersion", "controllers"];
 const LEGACY_CONTROLLER_FIELDS = ["controllerRoot", "controllerThreadId", "hostId", "dispatches"];
 const V2_CONTROLLER_FIELDS = [...LEGACY_CONTROLLER_FIELDS, "wakeWorker"];
-const CONTROLLER_FIELDS = [...V2_CONTROLLER_FIELDS, "lastReplacement"];
+const V3_CONTROLLER_FIELDS = [...V2_CONTROLLER_FIELDS, "lastReplacement"];
+const V4_CONTROLLER_FIELDS = [...V3_CONTROLLER_FIELDS, "taskSetReplacement"];
+const CONTROLLER_FIELDS = [...V4_CONTROLLER_FIELDS, "taskSetResetFence"];
 const CONTROLLER_REPLACEMENT_FIELDS = [
   "operationId",
   "oldControllerThreadId",
@@ -42,6 +47,50 @@ const CONTROLLER_REPLACEMENT_FIELDS = [
   "newControllerThreadId",
   "newHostId",
   "replacedAt",
+];
+const TASK_SET_REPLACEMENT_FIELDS = [
+  "phase",
+  "operationId",
+  "replacementSetHash",
+  "oldControllerThreadId",
+  "oldHostId",
+  "newControllerThreadId",
+  "newHostId",
+  "manifestPreparedHash",
+  "prepareToken",
+  "manifestSwitchedHash",
+  "preparedAt",
+  "committedAt",
+];
+const TASK_SET_PREPARE_FIELDS = [
+  "operationId",
+  "replacementSetHash",
+  "oldControllerThreadId",
+  "oldHostId",
+  "newControllerThreadId",
+  "newHostId",
+  "manifestPreparedHash",
+];
+const TASK_SET_RESET_FENCE_FIELDS = [
+  "phase",
+  "operationId",
+  "planHash",
+  "manifestExpectedHash",
+  "preparedAt",
+  "completedManifestHash",
+  "completedAt",
+];
+const TASK_SET_RESET_SEAL_FIELDS = [
+  "schemaVersion",
+  "kind",
+  "operationId",
+  "completedAt",
+  "sourceManifestHash",
+  "candidateHash",
+  "sourceHistoryHash",
+  "targetHistoryHash",
+  "historyEntryHash",
+  "finalManifestHash",
 ];
 const WAKE_WORKER_FIELDS = [
   "operationId",
@@ -79,6 +128,8 @@ const DISPATCH_ENVELOPE_FIELDS = [
 const DISPATCH_IDENTITY_FIELDS = ["chainId", "projectTaskId", "dispatchId", "generation", "rework"];
 const LEGACY_CLAIM_FIELDS = ["schemaVersion", "receiptId", "claimedAt"];
 const CLAIM_FIELDS = ["schemaVersion", "receiptId", "claimOwnerId", "claimedAt", "leaseUntil"];
+const LOCK_FIELDS = ["schemaVersion", "token", "pid", "createdAt", "heartbeatAt"];
+const LOCK_STALE_MS = 30_000;
 const WORKER_SAFE_ACTIONS = new Set(["read", "claim", "renew-claim"]);
 const RECEIPT_FIELDS = [
   "schemaVersion",
@@ -104,9 +155,17 @@ const samePath = (left, right) =>
   process.platform === "win32"
     ? comparablePath(left).toLowerCase() === comparablePath(right).toLowerCase()
     : comparablePath(left) === comparablePath(right);
+const normalizedPath = (value) => process.platform === "win32"
+  ? comparablePath(value).toLowerCase()
+  : comparablePath(value);
 
 function defaultStatePath() {
-  const codexRoot = process.env.CODEX_HOME || join(homedir(), ".codex");
+  const scriptPath = realpathSync.native(fileURLToPath(import.meta.url));
+  const packageRoot = dirname(dirname(scriptPath));
+  const skillsRoot = dirname(packageRoot);
+  const installed = basename(packageRoot).toLowerCase() === "onboard-code-projects" &&
+    basename(skillsRoot).toLowerCase() === "skills";
+  const codexRoot = installed ? dirname(skillsRoot) : join(homedir(), ".codex");
   return join(codexRoot, "skill-state", "onboard-code-projects", "runtime.json");
 }
 
@@ -126,8 +185,40 @@ function requireCounter(value, field) {
 }
 
 function requireIso(value, field) {
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value)) || !value.endsWith("Z")) {
+  const match = typeof value === "string" ? UTC_ISO_RE.exec(value) : null;
+  if (!match) throw new Error(`invalid-${field}`);
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  parsed.setUTCHours(hour, minute, second, 0);
+  if (year < 1 || parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day || parsed.getUTCHours() !== hour ||
+      parsed.getUTCMinutes() !== minute || parsed.getUTCSeconds() !== second) {
     throw new Error(`invalid-${field}`);
+  }
+  return value;
+}
+
+function isoTicks(value) {
+  const match = UTC_ISO_RE.exec(value);
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  parsed.setUTCHours(hour, minute, second, 0);
+  return BigInt(parsed.getTime()) * 10_000n + BigInt((match[7] ?? "").padEnd(7, "0") || "0");
+}
+
+function compareIso(left, right) {
+  const leftTicks = isoTicks(left);
+  const rightTicks = isoTicks(right);
+  return leftTicks < rightTicks ? -1 : leftTicks > rightTicks ? 1 : 0;
+}
+
+function requireClosedAction(value, required, optional = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      required.some((field) => !Object.hasOwn(value, field)) ||
+      Object.keys(value).some((field) => !required.includes(field) && !optional.includes(field))) {
+    throw new Error("controller-replacement-request-invalid");
   }
   return value;
 }
@@ -179,6 +270,100 @@ function validateControllerReplacement(value) {
   return value;
 }
 
+function taskSetPrepareToken(controllerRoot, value) {
+  return sha256([
+    "task-set-controller-replacement-v1",
+    normalizedPath(controllerRoot),
+    ...TASK_SET_PREPARE_FIELDS.map((field) => value[field]),
+    value.preparedAt,
+  ].join("\0"));
+}
+
+function validateTaskSetReplacement(value, controllerRoot) {
+  if (!keysEqual(value, TASK_SET_REPLACEMENT_FIELDS) || !["prepared", "committed"].includes(value.phase)) {
+    throw new Error("runtime-registry-invalid");
+  }
+  requireId(value.operationId, "controller-replacement-operation-id");
+  requireHash(value.replacementSetHash, "replacement-set-hash");
+  requireId(value.oldControllerThreadId, "old-controller-thread-id");
+  requireId(value.oldHostId, "old-host-id");
+  requireId(value.newControllerThreadId, "new-controller-thread-id");
+  requireId(value.newHostId, "new-host-id");
+  requireHash(value.manifestPreparedHash, "manifest-prepared-hash");
+  requireHash(value.prepareToken, "prepare-token");
+  requireIso(value.preparedAt, "controller-replacement-prepared-at");
+  if (value.oldControllerThreadId === value.newControllerThreadId ||
+      value.prepareToken !== taskSetPrepareToken(controllerRoot, value)) throw new Error("runtime-registry-invalid");
+  if (value.phase === "prepared") {
+    if (value.manifestSwitchedHash !== null || value.committedAt !== null) throw new Error("runtime-registry-invalid");
+  } else {
+    requireHash(value.manifestSwitchedHash, "manifest-switched-hash");
+    requireIso(value.committedAt, "controller-replacement-committed-at");
+    if (compareIso(value.committedAt, value.preparedAt) < 0) throw new Error("runtime-registry-invalid");
+  }
+  return value;
+}
+
+function validateTaskSetResetFence(value) {
+  if (!keysEqual(value, TASK_SET_RESET_FENCE_FIELDS) || !["prepared", "completed"].includes(value.phase)) {
+    throw new Error("runtime-registry-invalid");
+  }
+  requireId(value.operationId, "task-set-reset-operation-id");
+  requireHash(value.planHash, "task-set-reset-plan-hash");
+  requireHash(value.manifestExpectedHash, "task-set-reset-manifest-expected-hash");
+  requireIso(value.preparedAt, "task-set-reset-fence-prepared-at");
+  if (value.phase === "prepared") {
+    if (value.completedManifestHash !== null || value.completedAt !== null) throw new Error("runtime-registry-invalid");
+  } else {
+    requireHash(value.completedManifestHash, "task-set-reset-completed-manifest-hash");
+    requireIso(value.completedAt, "task-set-reset-fence-completed-at");
+    if (compareIso(value.completedAt, value.preparedAt) < 0) throw new Error("runtime-registry-invalid");
+  }
+  return value;
+}
+
+async function requireTaskSetResetSeal(controllerRoot, operationId, finalManifestHash, allowMissing = false) {
+  const sealPath = join(controllerRoot, "state", ".task-set-reset-seal.json");
+  let bytes;
+  try {
+    bytes = await readFile(sealPath);
+  } catch (error) {
+    if (error?.code === "ENOENT" && allowMissing) return;
+    if (error?.code === "ENOENT") throw new Error("task-set-reset-seal-required");
+    throw new Error("task-set-reset-seal-invalid");
+  }
+  if (bytes.length === 0 || bytes.length > 16_384) throw new Error("task-set-reset-seal-invalid");
+  let marker;
+  try {
+    marker = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error("task-set-reset-seal-invalid");
+  }
+  if (!keysEqual(marker, TASK_SET_RESET_SEAL_FIELDS) || marker.schemaVersion !== 1 ||
+      marker.kind !== "task-set-reset-seal" || JSON.stringify(marker) + "\n" !== bytes.toString("utf8")) {
+    throw new Error("task-set-reset-seal-invalid");
+  }
+  try {
+    requireId(marker.operationId, "task-set-reset-seal-operation-id");
+    requireIso(marker.completedAt, "task-set-reset-seal-completed-at");
+    for (const field of TASK_SET_RESET_SEAL_FIELDS.slice(4)) requireHash(marker[field], field);
+  } catch {
+    throw new Error("task-set-reset-seal-invalid");
+  }
+  if (marker.operationId !== operationId || marker.finalManifestHash !== finalManifestHash) {
+    throw new Error("task-set-reset-seal-conflict");
+  }
+  let manifestBytes;
+  try {
+    manifestBytes = await readFile(join(controllerRoot, ".codex-controller.json"));
+  } catch {
+    throw new Error("task-set-reset-seal-conflict");
+  }
+  if (createHash("sha256").update(manifestBytes).digest("hex") !== finalManifestHash) {
+    throw new Error("task-set-reset-seal-conflict");
+  }
+}
+
 function validateWakeAutomation(value) {
   if (!keysEqual(value, WAKE_AUTOMATION_FIELDS)) throw new Error("runtime-registry-invalid");
   requireId(value.operationId, "wake-automation-operation-id");
@@ -204,6 +389,45 @@ function validateWakeWorker(value) {
   return value;
 }
 
+function taskIdReserved(registry, taskId, ignoredReplacement = null) {
+  return registry.controllers.some((controller) =>
+    controller.controllerThreadId === taskId ||
+    (controller.taskSetReplacement !== ignoredReplacement &&
+     controller.taskSetReplacement?.newControllerThreadId === taskId) ||
+    controller.wakeWorker?.workerThreadId === taskId);
+}
+
+function validateTaskIdReservations(registry) {
+  const claims = new Map();
+  const claim = (taskId, controller, role) => {
+    const current = claims.get(taskId);
+    if (!current) {
+      claims.set(taskId, { controller, roles: new Set([role]) });
+      return;
+    }
+    const roles = new Set([...current.roles, role]);
+    if (current.controller === controller &&
+        [...roles].every((item) => item === "controller" || item === "committed-replacement")) {
+      current.roles = roles;
+      return;
+    }
+    throw new Error("runtime-registry-invalid");
+  };
+  for (const controller of registry.controllers) {
+    claim(controller.controllerThreadId, controller, "controller");
+    if (controller.taskSetReplacement) {
+      claim(
+        controller.taskSetReplacement.newControllerThreadId,
+        controller,
+        `${controller.taskSetReplacement.phase}-replacement`,
+      );
+    }
+    if (controller.wakeWorker?.workerThreadId) {
+      claim(controller.wakeWorker.workerThreadId, controller, "worker");
+    }
+  }
+}
+
 function validateRegistry(value) {
   if (!keysEqual(value, REGISTRY_FIELDS) || !Array.isArray(value.controllers)) {
     throw new Error("runtime-registry-invalid");
@@ -213,8 +437,14 @@ function validateRegistry(value) {
       if (!keysEqual(controller, LEGACY_CONTROLLER_FIELDS)) throw new Error("runtime-registry-invalid");
     }
     return validateRegistry({
-      schemaVersion: 3,
-      controllers: value.controllers.map((controller) => ({ ...controller, wakeWorker: null, lastReplacement: null })),
+      schemaVersion: 5,
+      controllers: value.controllers.map((controller) => ({
+        ...controller,
+        wakeWorker: null,
+        lastReplacement: null,
+        taskSetReplacement: null,
+        taskSetResetFence: null,
+      })),
     });
   }
   if (value.schemaVersion === 2) {
@@ -222,14 +452,38 @@ function validateRegistry(value) {
       if (!keysEqual(controller, V2_CONTROLLER_FIELDS)) throw new Error("runtime-registry-invalid");
     }
     return validateRegistry({
-      schemaVersion: 3,
-      controllers: value.controllers.map((controller) => ({ ...controller, lastReplacement: null })),
+      schemaVersion: 5,
+      controllers: value.controllers.map((controller) => ({
+        ...controller,
+        lastReplacement: null,
+        taskSetReplacement: null,
+        taskSetResetFence: null,
+      })),
     });
   }
-  if (value.schemaVersion !== 3) throw new Error("runtime-registry-invalid");
-  const controllerThreadIds = new Set(value.controllers.map((controller) => controller.controllerThreadId));
-  if (controllerThreadIds.size !== value.controllers.length) throw new Error("runtime-registry-invalid");
-  const workerThreadIds = new Set();
+  if (value.schemaVersion === 3) {
+    for (const controller of value.controllers) {
+      if (!keysEqual(controller, V3_CONTROLLER_FIELDS)) throw new Error("runtime-registry-invalid");
+    }
+    return validateRegistry({
+      schemaVersion: 5,
+      controllers: value.controllers.map((controller) => ({
+        ...controller,
+        taskSetReplacement: null,
+        taskSetResetFence: null,
+      })),
+    });
+  }
+  if (value.schemaVersion === 4) {
+    for (const controller of value.controllers) {
+      if (!keysEqual(controller, V4_CONTROLLER_FIELDS)) throw new Error("runtime-registry-invalid");
+    }
+    return validateRegistry({
+      schemaVersion: 5,
+      controllers: value.controllers.map((controller) => ({ ...controller, taskSetResetFence: null })),
+    });
+  }
+  if (value.schemaVersion !== 5) throw new Error("runtime-registry-invalid");
   const automationIds = new Set();
   for (const controller of value.controllers) {
     if (!keysEqual(controller, CONTROLLER_FIELDS) || typeof controller.controllerRoot !== "string" || !isAbsolute(controller.controllerRoot) ||
@@ -240,17 +494,34 @@ function validateRegistry(value) {
     controller.dispatches.forEach(validateDispatch);
     if (controller.lastReplacement !== null) {
       validateControllerReplacement(controller.lastReplacement);
-      if (controller.controllerThreadId !== controller.lastReplacement.newControllerThreadId ||
-          controller.hostId !== controller.lastReplacement.newHostId) throw new Error("runtime-registry-invalid");
+      if (controller.taskSetReplacement === null &&
+          (controller.controllerThreadId !== controller.lastReplacement.newControllerThreadId ||
+           controller.hostId !== controller.lastReplacement.newHostId)) throw new Error("runtime-registry-invalid");
+    }
+    if (controller.taskSetReplacement !== null) {
+      validateTaskSetReplacement(controller.taskSetReplacement, controller.controllerRoot);
+      const expectedThreadId = controller.taskSetReplacement.phase === "prepared"
+        ? controller.taskSetReplacement.oldControllerThreadId
+        : controller.taskSetReplacement.newControllerThreadId;
+      const expectedHostId = controller.taskSetReplacement.phase === "prepared"
+        ? controller.taskSetReplacement.oldHostId
+        : controller.taskSetReplacement.newHostId;
+      if (controller.controllerThreadId !== expectedThreadId || controller.hostId !== expectedHostId) {
+        throw new Error("runtime-registry-invalid");
+      }
+    }
+    if (controller.taskSetResetFence !== null) {
+      validateTaskSetResetFence(controller.taskSetResetFence);
+      if (controller.taskSetResetFence.phase === "completed" && controller.taskSetReplacement !== null) {
+        throw new Error("runtime-registry-invalid");
+      }
+      if (controller.taskSetResetFence.phase === "prepared" && controller.taskSetReplacement !== null &&
+          controller.taskSetResetFence.operationId !== controller.taskSetReplacement.operationId) {
+        throw new Error("runtime-registry-invalid");
+      }
     }
     if (controller.wakeWorker !== null) {
       validateWakeWorker(controller.wakeWorker);
-      if (controller.wakeWorker.workerThreadId !== null) {
-        if (controllerThreadIds.has(controller.wakeWorker.workerThreadId) || workerThreadIds.has(controller.wakeWorker.workerThreadId)) {
-          throw new Error("runtime-registry-invalid");
-        }
-        workerThreadIds.add(controller.wakeWorker.workerThreadId);
-      }
       const automationId = controller.wakeWorker.automation?.automationId;
       if (automationId !== null && automationId !== undefined) {
         if (automationIds.has(automationId)) throw new Error("runtime-registry-invalid");
@@ -258,6 +529,7 @@ function validateRegistry(value) {
       }
     }
   }
+  validateTaskIdReservations(value);
   return value;
 }
 
@@ -267,7 +539,7 @@ async function readRegistry(statePath) {
     if (Buffer.byteLength(raw, "utf8") > 1_048_576) throw new Error("runtime-registry-too-large");
     return validateRegistry(JSON.parse(raw));
   } catch (error) {
-    if (error?.code === "ENOENT") return { schemaVersion: 3, controllers: [] };
+    if (error?.code === "ENOENT") return { schemaVersion: 5, controllers: [] };
     throw error;
   }
 }
@@ -284,22 +556,103 @@ async function writeRegistry(statePath, registry) {
   }
 }
 
+function parseLock(raw) {
+  if (Buffer.byteLength(raw, "utf8") > 4_096) throw new Error("runtime-lock-invalid");
+  const value = JSON.parse(raw);
+  if (!keysEqual(value, LOCK_FIELDS) || value.schemaVersion !== 1 ||
+      !Number.isSafeInteger(value.pid) || value.pid <= 0) throw new Error("runtime-lock-invalid");
+  requireHash(value.token, "runtime-lock-token");
+  requireIso(value.createdAt, "runtime-lock-created-at");
+  requireIso(value.heartbeatAt, "runtime-lock-heartbeat-at");
+  if (compareIso(value.heartbeatAt, value.createdAt) < 0) throw new Error("runtime-lock-invalid");
+  return value;
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+async function removeLockIfUnchanged(lockPath, raw) {
+  try {
+    if (await readFile(lockPath, "utf8") !== raw) return false;
+    await rm(lockPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+async function recoverStaleLock(lockPath) {
+  let info;
+  let raw;
+  try {
+    [info, raw] = await Promise.all([stat(lockPath), readFile(lockPath, "utf8")]);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  let owner = null;
+  try { owner = parseLock(raw); } catch {}
+  const staleAt = owner ? Date.parse(owner.heartbeatAt) : info.mtimeMs;
+  if (Date.now() - staleAt <= LOCK_STALE_MS || (owner && processIsAlive(owner.pid))) return;
+  const claimPath = `${lockPath}.recovery`;
+  try {
+    await link(lockPath, claimPath);
+  } catch (error) {
+    if (error?.code === "EEXIST" || error?.code === "ENOENT") return;
+    if (error?.code === "EPERM") {
+      try { await stat(claimPath); return; } catch (claimError) {
+        if (claimError?.code !== "ENOENT") throw claimError;
+      }
+    }
+    throw error;
+  }
+  try {
+    if (await readFile(claimPath, "utf8") !== raw) return;
+    await rm(lockPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  } finally {
+    await rm(claimPath, { force: true });
+  }
+}
+
+async function releaseOwnedLock(lockPath, token) {
+  try {
+    const raw = await readFile(lockPath, "utf8");
+    if (parseLock(raw).token === token) await removeLockIfUnchanged(lockPath, raw);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
 async function withLock(lockPath, operation) {
   await mkdir(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + 5_000;
+  const createdAt = new Date().toISOString();
+  const token = sha256(["dispatch-return-runtime-lock-v1", randomUUID(), String(process.pid), createdAt].join("\0"));
+  const owner = { schemaVersion: 1, token, pid: process.pid, createdAt, heartbeatAt: createdAt };
   while (true) {
     try {
       const handle = await open(lockPath, "wx");
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-      await handle.close();
+      try {
+        await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+      } catch (error) {
+        await rm(lockPath, { force: true });
+        throw error;
+      } finally {
+        await handle.close();
+      }
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - (await stat(lockPath)).mtimeMs > 30_000) await rm(lockPath, { force: true });
-      } catch (inspectError) {
-        if (inspectError?.code !== "ENOENT") throw inspectError;
-      }
+      await recoverStaleLock(lockPath);
       if (Date.now() >= deadline) throw new Error("runtime-lock-timeout");
       await sleep(25);
     }
@@ -307,7 +660,7 @@ async function withLock(lockPath, operation) {
   try {
     return await operation();
   } finally {
-    await rm(lockPath, { force: true });
+    await releaseOwnedLock(lockPath, token);
   }
 }
 
@@ -322,6 +675,21 @@ async function mutateRegistry(statePath, operation) {
 
 function findController(registry, controllerRoot) {
   return registry.controllers.find((item) => samePath(item.controllerRoot, controllerRoot));
+}
+
+function requireResetFenceMutationAllowed(controller) {
+  const fence = controller.taskSetResetFence;
+  if (fence?.phase === "prepared" ||
+      (fence?.phase === "completed" && existsSync(join(controller.controllerRoot, "state", ".task-set-reset-seal.json")))) {
+    throw new Error("task-set-reset-fence-pending");
+  }
+}
+
+function requireWakeMutationAllowed(controller) {
+  requireResetFenceMutationAllowed(controller);
+  if (controller.taskSetReplacement?.phase === "prepared") {
+    throw new Error("controller-replacement-pending");
+  }
 }
 
 function sameDispatch(left, right) {
@@ -341,11 +709,13 @@ export async function registerController({
   return mutateRegistry(statePath, async (registry) => {
     const current = findController(registry, root);
     if (current) {
+      requireResetFenceMutationAllowed(current);
       if (current.controllerThreadId !== controllerThreadId || current.hostId !== hostId) {
         throw new Error("controller-binding-conflict");
       }
       return { state: "controller-exists", controllerRoot: root };
     }
+    if (taskIdReserved(registry, controllerThreadId)) throw new Error("controller-binding-conflict");
     registry.controllers.push({
       controllerRoot: root,
       controllerThreadId,
@@ -353,49 +723,334 @@ export async function registerController({
       dispatches: [],
       wakeWorker: null,
       lastReplacement: null,
+      taskSetReplacement: null,
+      taskSetResetFence: null,
     });
     return { state: "controller-registered", controllerRoot: root };
   });
 }
 
-export async function replaceController({
-  statePath = defaultStatePath(),
-  controllerRoot,
-  operationId,
-  oldControllerThreadId,
-  oldHostId,
-  newControllerThreadId,
-  newHostId,
-  replacedAt = new Date().toISOString(),
-}) {
-  const root = await requireRoot(controllerRoot, "controller-root");
-  const replacement = validateControllerReplacement({
-    operationId,
-    oldControllerThreadId,
-    oldHostId,
-    newControllerThreadId,
-    newHostId,
-    replacedAt,
-  });
+export async function replaceController() {
+  throw new Error("controller-replacement-uncoordinated-disabled");
+}
+
+function exactFenceMatch(current, expected, preparedAtWasProvided) {
+  return current.operationId === expected.operationId &&
+    current.planHash === expected.planHash &&
+    current.manifestExpectedHash === expected.manifestExpectedHash &&
+    (!preparedAtWasProvided || current.preparedAt === expected.preparedAt);
+}
+
+export async function prepareTaskSetResetFence(input) {
+  requireClosedAction(input, [
+    "controllerRoot",
+    "operationId",
+    "planHash",
+    "manifestExpectedHash",
+  ], ["statePath", "preparedAt"]);
+  const statePath = input.statePath ?? defaultStatePath();
+  const root = await requireRoot(input.controllerRoot, "controller-root");
+  const preparedAtWasProvided = Object.hasOwn(input, "preparedAt");
+  const prepared = {
+    phase: "prepared",
+    operationId: requireId(input.operationId, "task-set-reset-operation-id"),
+    planHash: requireHash(input.planHash, "task-set-reset-plan-hash"),
+    manifestExpectedHash: requireHash(input.manifestExpectedHash, "task-set-reset-manifest-expected-hash"),
+    preparedAt: requireIso(input.preparedAt ?? new Date().toISOString(), "task-set-reset-fence-prepared-at"),
+    completedManifestHash: null,
+    completedAt: null,
+  };
+  validateTaskSetResetFence(prepared);
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
     if (!controller) throw new Error("controller-not-registered");
-    if (controller.controllerThreadId === newControllerThreadId && controller.hostId === newHostId &&
-        controller.lastReplacement && CONTROLLER_REPLACEMENT_FIELDS.every(
-          (field) => controller.lastReplacement[field] === replacement[field],
-        )) return { state: "controller-replacement-exists", controllerRoot: root };
-    if (controller.controllerThreadId !== oldControllerThreadId || controller.hostId !== oldHostId) {
-      throw new Error("controller-binding-conflict");
+    const current = controller.taskSetResetFence;
+    if (current) {
+      if (current.operationId === prepared.operationId) {
+        if (!exactFenceMatch(current, prepared, preparedAtWasProvided)) throw new Error("task-set-reset-fence-conflict");
+        return {
+          state: current.phase === "prepared"
+            ? "task-set-reset-fence-prepare-exists"
+            : "task-set-reset-fence-complete-exists",
+          controllerRoot: root,
+          preparedAt: current.preparedAt,
+        };
+      }
+      if (current.phase === "prepared") throw new Error("task-set-reset-fence-conflict");
+    }
+    if (controller.taskSetReplacement !== null) throw new Error("controller-replacement-pending");
+    if (controller.dispatches.length !== 0) throw new Error("controller-not-quiescent");
+    if ((await listPending(root)).length !== 0) throw new Error("controller-pending-receipts");
+    if (controller.wakeWorker &&
+        (controller.wakeWorker.workerThreadId === null || controller.wakeWorker.clientThreadId === null)) {
+      throw new Error("wake-worker-intent-pending");
+    }
+    if (controller.wakeWorker?.automation?.automationId === null) {
+      throw new Error("wake-automation-intent-pending");
+    }
+    controller.taskSetResetFence = prepared;
+    return {
+      state: "task-set-reset-fence-prepared",
+      controllerRoot: root,
+      preparedAt: prepared.preparedAt,
+    };
+  });
+}
+
+function exactPrepareMatch(current, expected, preparedAtWasProvided) {
+  return TASK_SET_PREPARE_FIELDS.every((field) => current[field] === expected[field]) &&
+    (!preparedAtWasProvided || current.preparedAt === expected.preparedAt);
+}
+
+export async function prepareControllerReplacement(input) {
+  requireClosedAction(input, [
+    "controllerRoot",
+    ...TASK_SET_PREPARE_FIELDS,
+  ], ["statePath", "preparedAt"]);
+  const statePath = input.statePath ?? defaultStatePath();
+  const root = await requireRoot(input.controllerRoot, "controller-root");
+  const preparedAtWasProvided = Object.hasOwn(input, "preparedAt");
+  const preparedAt = requireIso(input.preparedAt ?? new Date().toISOString(), "controller-replacement-prepared-at");
+  const prepared = {
+    phase: "prepared",
+    operationId: requireId(input.operationId, "controller-replacement-operation-id"),
+    replacementSetHash: requireHash(input.replacementSetHash, "replacement-set-hash"),
+    oldControllerThreadId: requireId(input.oldControllerThreadId, "old-controller-thread-id"),
+    oldHostId: requireId(input.oldHostId, "old-host-id"),
+    newControllerThreadId: requireId(input.newControllerThreadId, "new-controller-thread-id"),
+    newHostId: requireId(input.newHostId, "new-host-id"),
+    manifestPreparedHash: requireHash(input.manifestPreparedHash, "manifest-prepared-hash"),
+    prepareToken: null,
+    manifestSwitchedHash: null,
+    preparedAt,
+    committedAt: null,
+  };
+  if (prepared.oldControllerThreadId === prepared.newControllerThreadId) {
+    throw new Error("controller-replacement-conflict");
+  }
+  prepared.prepareToken = taskSetPrepareToken(root, prepared);
+  validateTaskSetReplacement(prepared, root);
+  return mutateRegistry(statePath, async (registry) => {
+    const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    if (controller.taskSetReplacement) {
+      if (!exactPrepareMatch(controller.taskSetReplacement, prepared, preparedAtWasProvided)) {
+        // ponytail: one bounded audit slot; the caller's new manifestPreparedHash is the cross-store authorization gate.
+        if (controller.taskSetReplacement.phase !== "committed" ||
+            controller.taskSetReplacement.operationId === prepared.operationId) {
+          throw new Error("controller-replacement-conflict");
+        }
+      } else {
+        return {
+          state: "controller-replacement-prepare-exists",
+          controllerRoot: root,
+          prepareToken: controller.taskSetReplacement.prepareToken,
+          preparedAt: controller.taskSetReplacement.preparedAt,
+        };
+      }
+    }
+    if (controller.taskSetResetFence?.phase !== "prepared" ||
+        controller.taskSetResetFence.operationId !== prepared.operationId) {
+      throw new Error("task-set-reset-fence-required");
+    }
+    if (controller.controllerThreadId !== prepared.oldControllerThreadId || controller.hostId !== prepared.oldHostId) {
+      throw new Error("controller-replacement-conflict");
     }
     if (controller.dispatches.length !== 0) throw new Error("controller-not-quiescent");
     if ((await listPending(root)).length !== 0) throw new Error("controller-pending-receipts");
-    if (registry.controllers.some((item) => item !== controller && item.controllerThreadId === newControllerThreadId)) {
-      throw new Error("controller-binding-conflict");
+    if (taskIdReserved(registry, prepared.newControllerThreadId)) {
+      throw new Error("controller-replacement-conflict");
     }
-    controller.controllerThreadId = newControllerThreadId;
-    controller.hostId = newHostId;
-    controller.lastReplacement = replacement;
-    return { state: "controller-replaced", controllerRoot: root };
+    controller.taskSetReplacement = prepared;
+    return {
+      state: "controller-replacement-prepared",
+      controllerRoot: root,
+      prepareToken: prepared.prepareToken,
+      preparedAt,
+    };
+  });
+}
+
+export async function readControllerReplacement(input) {
+  requireClosedAction(input, ["controllerRoot"], ["statePath"]);
+  const statePath = input.statePath ?? defaultStatePath();
+  const root = await requireRoot(input.controllerRoot, "controller-root");
+  return withLock(`${statePath}.lock`, async () => {
+    const controller = findController(await readRegistry(statePath), root);
+    if (!controller) throw new Error("controller-not-registered");
+    const receipts = await listPending(root);
+    const replacement = controller.taskSetReplacement;
+    const legacy = replacement ? null : controller.lastReplacement;
+    const fence = controller.taskSetResetFence;
+    const worker = controller.wakeWorker;
+    const automation = worker?.automation ?? null;
+    return {
+      state: "controller-replacement-read",
+      controllerRoot: root,
+      controllerThreadId: controller.controllerThreadId,
+      hostId: controller.hostId,
+      replacementState: replacement?.phase ?? (legacy ? "legacy" : "none"),
+      operationId: replacement?.operationId ?? legacy?.operationId ?? null,
+      replacementSetHash: replacement?.replacementSetHash ?? null,
+      oldControllerThreadId: replacement?.oldControllerThreadId ?? legacy?.oldControllerThreadId ?? null,
+      oldHostId: replacement?.oldHostId ?? legacy?.oldHostId ?? null,
+      newControllerThreadId: replacement?.newControllerThreadId ?? legacy?.newControllerThreadId ?? null,
+      newHostId: replacement?.newHostId ?? legacy?.newHostId ?? null,
+      manifestPreparedHash: replacement?.manifestPreparedHash ?? null,
+      prepareToken: replacement?.prepareToken ?? null,
+      manifestSwitchedHash: replacement?.manifestSwitchedHash ?? null,
+      preparedAt: replacement?.preparedAt ?? null,
+      committedAt: replacement?.committedAt ?? legacy?.replacedAt ?? null,
+      activeDispatchCount: controller.dispatches.length,
+      unacknowledgedReceiptCount: receipts.length,
+      fenceState: fence?.phase ?? "none",
+      fenceOperationId: fence?.operationId ?? null,
+      fencePlanHash: fence?.planHash ?? null,
+      fenceManifestExpectedHash: fence?.manifestExpectedHash ?? null,
+      fencePreparedAt: fence?.preparedAt ?? null,
+      fenceCompletedManifestHash: fence?.completedManifestHash ?? null,
+      fenceCompletedAt: fence?.completedAt ?? null,
+      wakeWorkerState: worker
+        ? (worker.workerThreadId !== null && worker.clientThreadId !== null ? "bound" : "pending")
+        : "none",
+      wakeWorkerOperationId: worker?.operationId ?? null,
+      wakeWorkerThreadId: worker?.workerThreadId ?? null,
+      wakeWorkerClientThreadId: worker?.clientThreadId ?? null,
+      wakeAutomationState: automation ? (automation.automationId !== null ? "bound" : "pending") : "none",
+      wakeAutomationOperationId: automation?.operationId ?? null,
+      wakeAutomationId: automation?.automationId ?? null,
+    };
+  });
+}
+
+export async function commitControllerReplacement(input) {
+  requireClosedAction(input, [
+    "controllerRoot",
+    ...TASK_SET_PREPARE_FIELDS,
+    "preparedAt",
+    "prepareToken",
+    "manifestSwitchedHash",
+  ], ["statePath", "committedAt"]);
+  const statePath = input.statePath ?? defaultStatePath();
+  const root = await requireRoot(input.controllerRoot, "controller-root");
+  const expected = {
+    ...Object.fromEntries(TASK_SET_PREPARE_FIELDS.map((field) => [field, input[field]])),
+    preparedAt: requireIso(input.preparedAt, "controller-replacement-prepared-at"),
+    prepareToken: requireHash(input.prepareToken, "prepare-token"),
+  };
+  requireId(expected.operationId, "controller-replacement-operation-id");
+  requireHash(expected.replacementSetHash, "replacement-set-hash");
+  requireId(expected.oldControllerThreadId, "old-controller-thread-id");
+  requireId(expected.oldHostId, "old-host-id");
+  requireId(expected.newControllerThreadId, "new-controller-thread-id");
+  requireId(expected.newHostId, "new-host-id");
+  requireHash(expected.manifestPreparedHash, "manifest-prepared-hash");
+  const manifestSwitchedHash = requireHash(input.manifestSwitchedHash, "manifest-switched-hash");
+  const committedAtWasProvided = Object.hasOwn(input, "committedAt");
+  const committedAt = requireIso(input.committedAt ?? new Date().toISOString(), "controller-replacement-committed-at");
+  return mutateRegistry(statePath, async (registry) => {
+    const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    const current = controller.taskSetReplacement;
+    if (!current) throw new Error("controller-replacement-not-prepared");
+    if (!exactPrepareMatch(current, expected, true) || current.prepareToken !== expected.prepareToken) {
+      throw new Error("controller-replacement-conflict");
+    }
+    if (current.phase === "committed") {
+      if (current.manifestSwitchedHash !== manifestSwitchedHash ||
+          (committedAtWasProvided && current.committedAt !== committedAt) ||
+          controller.controllerThreadId !== current.newControllerThreadId || controller.hostId !== current.newHostId) {
+        throw new Error("controller-replacement-conflict");
+      }
+      return {
+        state: "controller-replacement-commit-exists",
+        controllerRoot: root,
+        committedAt: current.committedAt,
+      };
+    }
+    if (controller.taskSetResetFence?.phase !== "prepared" ||
+        controller.taskSetResetFence.operationId !== current.operationId) {
+      throw new Error("task-set-reset-fence-required");
+    }
+    if (controller.controllerThreadId !== current.oldControllerThreadId || controller.hostId !== current.oldHostId) {
+      throw new Error("controller-replacement-conflict");
+    }
+    if (controller.dispatches.length !== 0) throw new Error("controller-not-quiescent");
+    if ((await listPending(root)).length !== 0) throw new Error("controller-pending-receipts");
+    if (taskIdReserved(registry, current.newControllerThreadId, current)) {
+      throw new Error("controller-replacement-conflict");
+    }
+    controller.controllerThreadId = current.newControllerThreadId;
+    controller.hostId = current.newHostId;
+    controller.taskSetReplacement = {
+      ...current,
+      phase: "committed",
+      manifestSwitchedHash,
+      committedAt,
+    };
+    return { state: "controller-replacement-committed", controllerRoot: root, committedAt };
+  });
+}
+
+export async function completeTaskSetResetFence(input) {
+  requireClosedAction(input, [
+    "controllerRoot",
+    "operationId",
+    "completedManifestHash",
+  ], ["statePath", "completedAt"]);
+  const statePath = input.statePath ?? defaultStatePath();
+  const root = await requireRoot(input.controllerRoot, "controller-root");
+  const operationId = requireId(input.operationId, "task-set-reset-operation-id");
+  const completedManifestHash = requireHash(
+    input.completedManifestHash,
+    "task-set-reset-completed-manifest-hash",
+  );
+  const completedAt = requireIso(input.completedAt ?? new Date().toISOString(), "task-set-reset-fence-completed-at");
+  return mutateRegistry(statePath, async (registry) => {
+    const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    const fence = controller.taskSetResetFence;
+    if (!fence || fence.operationId !== operationId) throw new Error("task-set-reset-fence-conflict");
+    if (fence.phase === "completed") {
+      if (fence.completedManifestHash !== completedManifestHash ||
+          fence.completedAt !== completedAt || controller.taskSetReplacement !== null) {
+        throw new Error("task-set-reset-fence-conflict");
+      }
+      await requireTaskSetResetSeal(root, operationId, completedManifestHash, true);
+      return {
+        state: "task-set-reset-fence-complete-exists",
+        controllerRoot: root,
+        completedAt: fence.completedAt,
+      };
+    }
+    await requireTaskSetResetSeal(root, operationId, completedManifestHash);
+    const replacement = controller.taskSetReplacement;
+    if (!replacement || replacement.phase !== "committed" || replacement.operationId !== operationId ||
+        controller.controllerThreadId !== replacement.newControllerThreadId || controller.hostId !== replacement.newHostId) {
+      throw new Error("controller-replacement-not-committed");
+    }
+    if (compareIso(completedAt, fence.preparedAt) < 0 ||
+        compareIso(completedAt, replacement.committedAt) < 0) {
+      throw new Error("task-set-reset-fence-conflict");
+    }
+    if (controller.dispatches.length !== 0) throw new Error("controller-not-quiescent");
+    if ((await listPending(root)).length !== 0) throw new Error("controller-pending-receipts");
+    controller.lastReplacement = {
+      operationId: replacement.operationId,
+      oldControllerThreadId: replacement.oldControllerThreadId,
+      oldHostId: replacement.oldHostId,
+      newControllerThreadId: replacement.newControllerThreadId,
+      newHostId: replacement.newHostId,
+      replacedAt: replacement.committedAt,
+    };
+    controller.taskSetReplacement = null;
+    controller.taskSetResetFence = {
+      ...fence,
+      phase: "completed",
+      completedManifestHash,
+      completedAt,
+    };
+    return { state: "task-set-reset-fence-completed", controllerRoot: root, completedAt };
   });
 }
 
@@ -423,6 +1078,7 @@ export async function prepareWakeWorker({
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
     if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
     if (controller.hostId !== hostId) throw new Error("wake-worker-host-conflict");
     const current = controller.wakeWorker;
     if (current) {
@@ -453,7 +1109,10 @@ export async function recordWakeWorkerClientThread({
   requireId(operationId, "wake-worker-operation-id");
   requireId(clientThreadId, "wake-worker-client-thread-id");
   return mutateRegistry(statePath, async (registry) => {
-    const current = findController(registry, root)?.wakeWorker;
+    const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
+    const current = controller.wakeWorker;
     if (!current || current.operationId !== operationId) throw new Error("wake-worker-conflict");
     if (current.clientThreadId === clientThreadId) return { state: "wake-worker-client-exists", clientThreadId };
     if (current.clientThreadId !== null) throw new Error("wake-worker-conflict");
@@ -479,17 +1138,16 @@ export async function bindWakeWorker({
   requireId(hostId, "wake-worker-host-id");
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
     const current = controller?.wakeWorker;
     if (!current || current.operationId !== operationId || current.codexProjectId !== codexProjectId ||
         current.hostId !== hostId || !samePath(current.projectRoot, exactProjectRoot)) {
       throw new Error("wake-worker-conflict");
     }
-    if (registry.controllers.some((item) => item.controllerThreadId === workerThreadId ||
-        (item !== controller && item.wakeWorker?.workerThreadId === workerThreadId))) {
-      throw new Error("wake-worker-conflict");
-    }
     if (current.workerThreadId === workerThreadId) return { state: "wake-worker-exists", workerThreadId };
     if (current.workerThreadId !== null) throw new Error("wake-worker-conflict");
+    if (taskIdReserved(registry, workerThreadId)) throw new Error("wake-worker-conflict");
     current.workerThreadId = workerThreadId;
     return { state: "wake-worker-bound", workerThreadId };
   });
@@ -503,7 +1161,10 @@ export async function prepareWakeAutomation({
   requireId(operationId, "wake-automation-operation-id");
   requireIso(startedAt, "wake-automation-started-at");
   return mutateRegistry(statePath, async (registry) => {
-    const current = findController(registry, root)?.wakeWorker;
+    const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
+    const current = controller.wakeWorker;
     if (!current || current.workerThreadId !== workerThreadId) throw new Error("wake-worker-conflict");
     if (current.automation) {
       if (current.automation.operationId !== operationId || current.automation.startedAt !== startedAt) {
@@ -525,6 +1186,8 @@ export async function bindWakeAutomation({
   requireId(automationId, "wake-automation-id");
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
+    if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
     const current = controller?.wakeWorker;
     if (!current || current.workerThreadId !== workerThreadId || !current.automation ||
         current.automation.operationId !== operationId) throw new Error("wake-automation-conflict");
@@ -554,6 +1217,7 @@ export async function clearWakeWorker({
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
     if (!controller) throw new Error("controller-not-registered");
+    requireWakeMutationAllowed(controller);
     const current = controller.wakeWorker;
     if (!current) return { state: "wake-worker-not-registered", controllerRoot: root };
     if (current.operationId !== expectedOperationId || current.workerThreadId !== expectedWorkerThreadId ||
@@ -570,6 +1234,8 @@ export async function registerDispatch({ statePath = defaultStatePath(), control
   return mutateRegistry(statePath, async (registry) => {
     const controller = findController(registry, root);
     if (!controller) throw new Error("controller-not-registered");
+    requireResetFenceMutationAllowed(controller);
+    if (controller.taskSetReplacement?.phase === "prepared") throw new Error("controller-replacement-pending");
     const current = controller.dispatches.find((item) => item.projectTaskId === dispatch.projectTaskId);
     if (current) {
       if (!sameDispatch(current, dispatch)) throw new Error("active-dispatch-conflict");
@@ -753,41 +1419,43 @@ export async function captureStop({ statePath = defaultStatePath(), input, now =
   } catch {
     return { state: "ignored" };
   }
-  const registry = await readRegistry(statePath);
-  const matches = [];
-  for (const controller of registry.controllers) {
-    for (const dispatch of controller.dispatches) {
-      if (dispatch.projectTaskId === sessionId && samePath(dispatch.projectRoot, cwd) &&
-          dispatch.chainId === envelope.chainId && dispatch.dispatchId === envelope.dispatchId &&
-          dispatch.generation === envelope.generation && dispatch.rework === envelope.rework &&
-          dispatch.taskSpecHash === envelope.taskSpecHash) matches.push({ controller, dispatch });
+  return withLock(`${statePath}.lock`, async () => {
+    const registry = await readRegistry(statePath);
+    const matches = [];
+    for (const controller of registry.controllers) {
+      for (const dispatch of controller.dispatches) {
+        if (dispatch.projectTaskId === sessionId && samePath(dispatch.projectRoot, cwd) &&
+            dispatch.chainId === envelope.chainId && dispatch.dispatchId === envelope.dispatchId &&
+            dispatch.generation === envelope.generation && dispatch.rework === envelope.rework &&
+            dispatch.taskSpecHash === envelope.taskSpecHash) matches.push({ controller, dispatch });
+      }
     }
-  }
-  if (matches.length !== 1) return { state: "ignored" };
-  const evidenceHash = sha256(input.last_assistant_message);
-  const receiptId = receiptIdentity(envelope, evidenceHash, turnId);
-  const controllerRoot = await requireRoot(matches[0].controller.controllerRoot, "controller-root");
-  if (!samePath(controllerRoot, matches[0].controller.controllerRoot)) return { state: "ignored" };
-  const receipt = {
-    schemaVersion: 1,
-    receiptId,
-    receivedAt: now,
-    sessionId,
-    turnId,
-    cwd,
-    controllerRoot,
-    evidenceHash,
-    envelope,
-  };
-  const paths = receiptPaths(controllerRoot, receiptId);
-  await mkdir(dirname(paths.inbox), { recursive: true });
-  try {
-    await writeFile(paths.inbox, `${JSON.stringify(receipt)}\n`, { encoding: "utf8", flag: "wx" });
-    return { state: "receipt-recorded", receiptId };
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    return { state: "receipt-exists", receiptId };
-  }
+    if (matches.length !== 1) return { state: "ignored" };
+    const evidenceHash = sha256(input.last_assistant_message);
+    const receiptId = receiptIdentity(envelope, evidenceHash, turnId);
+    const controllerRoot = await requireRoot(matches[0].controller.controllerRoot, "controller-root");
+    if (!samePath(controllerRoot, matches[0].controller.controllerRoot)) return { state: "ignored" };
+    const receipt = {
+      schemaVersion: 1,
+      receiptId,
+      receivedAt: now,
+      sessionId,
+      turnId,
+      cwd,
+      controllerRoot,
+      evidenceHash,
+      envelope,
+    };
+    const paths = receiptPaths(controllerRoot, receiptId);
+    await mkdir(dirname(paths.inbox), { recursive: true });
+    try {
+      await writeFile(paths.inbox, `${JSON.stringify(receipt)}\n`, { encoding: "utf8", flag: "wx" });
+      return { state: "receipt-recorded", receiptId };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      return { state: "receipt-exists", receiptId };
+    }
+  });
 }
 
 function validateReceipt(value, controllerRoot, expectedReceiptId) {
@@ -833,7 +1501,7 @@ async function listPending(controllerRoot) {
     const raw = await readFile(paths.inbox, "utf8");
     receipts.push(validateReceipt(JSON.parse(raw), controllerRoot, receiptId));
   }
-  receipts.sort((left, right) => left.receivedAt.localeCompare(right.receivedAt) || left.receiptId.localeCompare(right.receiptId));
+  receipts.sort((left, right) => compareIso(left.receivedAt, right.receivedAt) || left.receiptId.localeCompare(right.receiptId));
   return receipts;
 }
 
@@ -881,14 +1549,14 @@ export async function claimPending({
         if (keysEqual(previous, LEGACY_CLAIM_FIELDS) && previous.schemaVersion === 1 &&
             previous.receiptId === receipt.receiptId) {
           requireIso(previous.claimedAt, "claimed-at");
-          if (Date.parse(now) < Date.parse(previous.claimedAt) + retryAfterMs) return false;
+          if (isoTicks(now) < isoTicks(previous.claimedAt) + BigInt(retryAfterMs) * 10_000n) return false;
         } else if (keysEqual(previous, CLAIM_FIELDS) && previous.schemaVersion === 2 &&
                    previous.receiptId === receipt.receiptId) {
           requireId(previous.claimOwnerId, "claim-owner-id");
           requireIso(previous.claimedAt, "claimed-at");
           requireIso(previous.leaseUntil, "lease-until");
-          if (Date.parse(previous.leaseUntil) <= Date.parse(previous.claimedAt)) throw new Error("receipt-claim-invalid");
-          if (Date.parse(now) < Date.parse(previous.leaseUntil)) return false;
+          if (compareIso(previous.leaseUntil, previous.claimedAt) <= 0) throw new Error("receipt-claim-invalid");
+          if (compareIso(now, previous.leaseUntil) < 0) return false;
         } else {
           throw new Error("receipt-claim-invalid");
         }
@@ -939,11 +1607,13 @@ export async function renewClaim({
         current.claimOwnerId !== claimOwnerId) throw new Error("receipt-claim-conflict");
     requireIso(current.claimedAt, "claimed-at");
     requireIso(current.leaseUntil, "lease-until");
-    const nowMs = Date.parse(now);
-    if (nowMs < Date.parse(current.claimedAt) || nowMs >= Date.parse(current.leaseUntil)) {
+    if (compareIso(now, current.claimedAt) < 0 || compareIso(now, current.leaseUntil) >= 0) {
       throw new Error("receipt-claim-expired");
     }
-    const leaseUntil = new Date(Math.max(Date.parse(current.leaseUntil), nowMs + leaseMs)).toISOString();
+    const proposedLeaseUntil = addMilliseconds(now, leaseMs);
+    const leaseUntil = compareIso(current.leaseUntil, proposedLeaseUntil) >= 0
+      ? current.leaseUntil
+      : proposedLeaseUntil;
     const renewed = { ...current, leaseUntil };
     const temporary = `${paths.claim}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(renewed)}\n`, { flag: "wx" });
@@ -1023,6 +1693,11 @@ async function main() {
   let result;
   if (action === "register-controller") result = await registerController({ ...payload, statePath });
   else if (action === "replace-controller") result = await replaceController({ ...payload, statePath });
+  else if (action === "prepare-task-set-reset-fence") result = await prepareTaskSetResetFence({ ...payload, statePath });
+  else if (action === "prepare-controller-replacement") result = await prepareControllerReplacement({ ...payload, statePath });
+  else if (action === "read-controller-replacement") result = await readControllerReplacement({ ...payload, statePath });
+  else if (action === "commit-controller-replacement") result = await commitControllerReplacement({ ...payload, statePath });
+  else if (action === "complete-task-set-reset-fence") result = await completeTaskSetResetFence({ ...payload, statePath });
   else if (action === "read-wake-worker") result = await readWakeWorker({ ...payload, statePath });
   else if (action === "prepare-wake-worker") result = await prepareWakeWorker({ ...payload, statePath });
   else if (action === "record-wake-worker-client") result = await recordWakeWorkerClientThread({ ...payload, statePath });
