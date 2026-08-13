@@ -132,7 +132,7 @@ Action: Apply
 planHash: <返回的 planHash>
 ```
 
-Plan 不会写入，只授权稳定的替换范围；用户查看 Plan 期间即使任务历史变化，也无需重新批准。Apply 只接受返回的精确哈希，先创建不含业务摘要的待命任务，再完整核验并冻结旧历史，发送最终有界脱敏交接后才激活新任务组。系统不删除任务；如执行中断，只继续同一操作。高级行为与恢复方式见[中控运行时参考](./references/controller-runtime.md)。
+Plan 不会写入，只授权稳定的替换范围；用户查看 Plan 期间即使任务历史变化，也无需重新批准。Apply 只接受返回的精确哈希，先创建仅含唯一创建标记、不含业务交接的待命任务，再完整核验并冻结旧历史，发送最终有界脱敏交接后才激活新任务组。系统不删除任务；如执行中断，只继续同一操作。高级行为与恢复方式见[中控运行时参考](./references/controller-runtime.md)。
 
 重置还要求 Codex 任务 API 可用，且每个替换目标都是根目录唯一的精确已保存项目；根目录有歧义或无法回读任务 cwd 时会安全阻断。
 
@@ -194,7 +194,7 @@ Skill 只克隆到 `cloneRoot` 的新子目录，随后返回 `needs-project-add
 | Git | Git URL 和 Git 元数据。 |
 | OpenSSH | 仅 SSH Git URL。 |
 | Git LFS | 仅 `fullLfsCheckout: true`。 |
-| Node.js 18+ | 仅耐久 Stop 回执和自动唤醒。 |
+| Node.js 18+ | 中控任务组重置、耐久 Stop 回执和自动唤醒。 |
 
 以下 read-only 预检不会创建项目、任务、索引、中控文件或 Git 状态：
 
@@ -206,11 +206,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 
 # SSH Git URL
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireGit -RequireSsh
 # 仅完整 LFS 检出时，在适用 Git 命令后追加 -RequireLfs。
-# 耐久事件回传
+# 中控任务组重置或耐久事件回传
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireNode
 ```
 
-仅安装 Skill 时可使用项目隔离、索引、可选中控和前台监控。耐久回执需要插件 Stop Hook 与 Node.js；自动唤醒还需要 Skill 验证对应运行时能力。
+仅安装 Skill 时可使用项目隔离、索引、可选中控和前台监控。中控任务组重置需要 Node.js 18+。耐久回执需要插件 Stop Hook 与 Node.js；自动唤醒还需要 Skill 验证对应运行时能力。
 
 ## 权限与本地数据
 

@@ -19,6 +19,7 @@ Run from the repository root on Windows PowerShell 5.1:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\index-mode.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\source-input.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\chain-store.tests.ps1
@@ -28,6 +29,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\control-state.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\task-set-reset.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\skill-size.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\skill-contract.tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -ReleaseGate
 ```
 
 In the installed maintainer environment, also run the official Skill validator supplied with Codex and record its exact command and result. Do not add that environment-owned path to repository CI.

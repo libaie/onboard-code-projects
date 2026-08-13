@@ -132,7 +132,7 @@ Action: Apply
 planHash: <returned planHash>
 ```
 
-Plan does not write and authorizes only the stable replacement scope; changing task history while reviewing the Plan does not require another approval. Apply accepts only the exact returned hash, creates empty standby replacements, rechecks and freezes the complete old history, sends the final bounded sanitized handoff, and only then activates the new set. It deletes no task and resumes the same operation after interruption. See the [controller runtime reference](./references/controller-runtime.md) for advanced behavior and recovery.
+Plan does not write and authorizes only the stable replacement scope; changing task history while reviewing the Plan does not require another approval. Apply accepts only the exact returned hash, creates bootstrap-only standby replacements with a unique creation marker and no business handoff, rechecks and freezes the complete old history, sends the final bounded sanitized handoff, and only then activates the new set. It deletes no task and resumes the same operation after interruption. See the [controller runtime reference](./references/controller-runtime.md) for advanced behavior and recovery.
 
 Reset also requires usable Codex task APIs and an exact single-root saved project for every replacement; ambiguous roots or an unprovable task cwd block safely.
 
@@ -194,7 +194,7 @@ Advanced upgrade and reconciliation inputs are documented in [the controller run
 | Git | Git URLs and Git metadata. |
 | OpenSSH | SSH Git URLs only. |
 | Git LFS | Only when `fullLfsCheckout: true`. |
-| Node.js 18+ | Durable Stop receipts and automatic wake only. |
+| Node.js 18+ | Controller task-set reset, durable Stop receipts, and automatic wake. |
 
 These read-only preflight commands do not create projects, tasks, indexes, controller files, or Git state:
 
@@ -206,11 +206,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 
 # SSH Git URL
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireGit -RequireSsh
 # Add -RequireLfs to the applicable Git command only for a full LFS checkout.
-# Durable event return
+# Controller task-set reset or durable event return
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireNode
 ```
 
-Skill-only installation provides project isolation, indexing, an optional controller, and foreground monitoring. Durable receipts require the plugin Stop Hook and Node.js; automatic wake also requires the capabilities validated by the Skill.
+Skill-only installation provides project isolation, indexing, an optional controller, and foreground monitoring. Controller task-set reset requires Node.js 18+. Durable receipts require the plugin Stop Hook and Node.js; automatic wake also requires the capabilities validated by the Skill.
 
 ## Permissions and local data
 
