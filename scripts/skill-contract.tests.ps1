@@ -154,6 +154,47 @@ function Assert-TaskSetResetContract {
     Assert-Contains $entry.Text 'task-set-reset\.tests\.ps1' "$($entry.Name) must run task-set-reset.tests.ps1"
   }
   Assert-Contains $preflight "'scripts/task-set-reset\.tests\.ps1'" 'Release package gate must include task-set-reset.tests.ps1'
+
+  $finalContractFailures = @()
+  $beforePlanCapabilities = '(?im)^Before Plan,(?=[^\r\n]{0,1200}\blist_projects\b)(?=[^\r\n]{0,1200}\blist_threads\b)(?=[^\r\n]{0,1200}\bread_thread\b)(?=[^\r\n]{0,1200}\bcreate_thread\b)(?=[^\r\n]{0,1200}\bsend_message_to_thread\b)(?=[^\r\n]{0,1200}\bwait_threads\b)(?=[^\r\n]{0,1200}\bset_thread_archived\b)[^\r\n]+$'
+  $authorizedApplyFence = '(?is)(?:start|beginning).{0,160}(?:separately authorized|separate authorization).{0,120}Apply.{0,300}(?:after|following).{0,160}fresh quiescence.{0,300}prepare-task-set-reset-fence.{0,300}before.{0,180}(?:manifest candidate|manifest Apply|PrepareCandidate)'
+  foreach ($document in $policyDocuments) {
+    if ($document.Text -notmatch $beforePlanCapabilities) {
+      $finalContractFailures += "$($document.Name) must prove list_threads with every reset task API before Plan"
+    }
+    if ($document.Text -notmatch $authorizedApplyFence -or
+        $document.Text -match '(?is)Immediately after Plan.{0,160}prepare-task-set-reset-fence') {
+      $finalContractFailures += "$($document.Name) must acquire the runtime fence only at the separately authorized Apply start, after fresh quiescence and before any manifest candidate"
+    }
+  }
+
+  if ($skillRootDocument -notmatch '(?is)(?:resetControllerTasks=true|task-set reset)(?=.{0,1800}scripts/preflight\.ps1\s+-RequireNode)(?=.{0,1800}Node(?:\.js)?\s*18\+)') {
+    $finalContractFailures += 'resetControllerTasks=true must require the Node.js 18+ preflight before reset work'
+  }
+  foreach ($entry in @(
+    @{ Name = 'English README'; Text = $readme },
+    @{ Name = 'Chinese README'; Text = $readmeZh }
+  )) {
+    if ($entry.Text -notmatch '(?im)^\|\s*Node\.js 18\+\s*\|(?=[^\r\n]*(?:task-set reset|task set reset|controller task reset|\u4efb\u52a1\u7ec4\u91cd\u7f6e|\u4efb\u52a1\u96c6\u91cd\u7f6e))[^\r\n]+\|\s*$') {
+      $finalContractFailures += "$($entry.Name) must document Node.js 18+ as a task-set reset dependency"
+    }
+    if ($entry.Text -match '(?i)\bempty\s+standby\s+replacements?\b') {
+      $finalContractFailures += "$($entry.Name) must not describe marker-only standby bootstrap tasks as empty replacements"
+    }
+  }
+
+  $deterministicCommands = @(
+    'preflight.ps1 -SelfTest', 'preflight.tests.ps1', 'index-mode.tests.ps1', 'source-input.tests.ps1',
+    'chain-store.tests.ps1', 'dispatch-return-runtime.tests.mjs', 'init-controller.tests.ps1',
+    'control-state.tests.ps1', 'task-set-reset.tests.ps1', 'skill-size.tests.ps1',
+    'skill-contract.tests.ps1', 'preflight.ps1 -ReleaseGate'
+  )
+  try { Assert-InOrder $releaseText $deterministicCommands 'Release checklist deterministic commands must match CI order' }
+  catch { $finalContractFailures += $_.Exception.Message }
+
+  if ($finalContractFailures.Count -gt 0) {
+    throw ("Final task-set reset contract failures:`n- " + ($finalContractFailures -join "`n- "))
+  }
 }
 
 Assert-TaskSetResetContract
