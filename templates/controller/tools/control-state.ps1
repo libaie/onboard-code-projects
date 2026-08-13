@@ -1490,6 +1490,8 @@ function New-MutatedManifest {
     'prepare-task-set-reset' {
       $payload = Convert-Payload $Json @('operationId','planHash','initialEvidenceHash','fromTaskSetId','toTaskSetId','coordinator','expectedController','expectedProjectBindings','targets','initialActiveChains','initialExternalQuiescence','preparedAt')
       foreach ($field in @('operationId','fromTaskSetId','toTaskSetId')) { if (-not (Test-ControllerText $payload.$field 200)) { throw 'payload' } }
+      try{$history=Read-TaskSetResetHistory $Root}catch{throw 'state'}
+      if(@($history.Items|Where-Object{$_.record.operationId-ceq$payload.operationId}).Count-ne0){throw 'state'}
       if (-not (Test-Hash $payload.planHash) -or-not(Test-Hash $payload.initialEvidenceHash)-or $payload.toTaskSetId -cne (Get-NextTaskSetId $Root $payload.fromTaskSetId $payload.operationId) -or -not (Test-UtcIso8601 $payload.preparedAt)) { throw 'payload' }
       $coordinator=try{Convert-TaskSetCoordinator $payload.coordinator 'payload'}catch{throw 'payload'}
       $expectedController = try { Convert-ControllerBinding $payload.expectedController $Root } catch { throw 'payload' }
@@ -2180,6 +2182,8 @@ try {
     try{
       $payload=Convert-Payload $PayloadJson @('operationId','fromTaskSetId','toTaskSetId','coordinator','expectedController','expectedProjectBindings','targets')
       foreach($field in @('operationId','fromTaskSetId','toTaskSetId')){if(-not(Test-ControllerText $payload.$field 200)){throw 'payload'}}
+      $history=Read-TaskSetResetHistory $normalizedRoot
+      if(@($history.Items|Where-Object{$_.record.operationId-ceq$payload.operationId}).Count-ne0){throw 'state'}
       if($payload.toTaskSetId-cne(Get-NextTaskSetId $normalizedRoot $payload.fromTaskSetId $payload.operationId)){throw 'payload'}
       $coordinator=Convert-TaskSetCoordinator $payload.coordinator 'payload';$expectedController=Convert-ControllerBinding $payload.expectedController $normalizedRoot
       $expectedProjects=@(Convert-ProjectBindings $payload.expectedProjectBindings $normalizedRoot)
@@ -2250,6 +2254,10 @@ try {
 
   if ($Action -ceq 'PrepareCandidate') {
     if (-not (Test-Hash $ExpectedHash) -or [string]::IsNullOrWhiteSpace($Operation)) { Finish-Invalid }
+    try { $gate = Enter-ControllerMutex $normalizedRoot } catch { Finish-Blocked 'controller-io-failure' $normalizedRoot }
+    if (-not $gate.Acquired) { $gate.Mutex.Dispose(); Finish-Conflict 'controller-mutex-timeout' $normalizedRoot $null $null $null 'Wait for the current controller writer to finish, then retry.' }
+    try {
+    if (Test-Path -LiteralPath (Get-TaskSetResetSealPath $normalizedRoot)) { Finish-Conflict 'controller-task-set-reset-seal-recovery-required' $normalizedRoot }
     try { $current = Read-Manifest $normalizedRoot }
     catch {
       if ($_.Exception.Message -ceq 'manifest') { Finish-Conflict 'controller-manifest-invalid' $normalizedRoot }
@@ -2304,6 +2312,11 @@ try {
     }
     catch { Finish-Blocked 'controller-io-failure' $normalizedRoot $current.Hash $candidate $validated.Hash }
     Write-StateResult prepared 'controller-candidate-prepared' $normalizedRoot $current.Hash $candidate $validated.Hash $validated.Hash $validated.Data 'Apply this exact candidate with the same ExpectedHash, candidate path, and candidate hash.' @() 0
+    }
+    finally {
+      try { $gate.Mutex.ReleaseMutex() } catch {}
+      $gate.Mutex.Dispose()
+    }
   }
 
   if ($Action -ceq 'ApplyCandidate') {
@@ -2327,6 +2340,7 @@ try {
         Finish-Blocked 'controller-io-failure' $normalizedRoot $null $candidate $CandidateHash
       }
       if ($current.Hash -cne $ExpectedHash) { Finish-Conflict 'controller-hash-conflict' $normalizedRoot $current.Hash $candidate $CandidateHash }
+      try { Assert-TaskSetResetHistory $normalizedRoot $lockedValidated.Data } catch { Finish-Conflict 'controller-task-state-conflict' $normalizedRoot $current.Hash $candidate $CandidateHash }
       if($lockedValidated.Data.schemaVersion-eq3-and$null-ne$lockedValidated.Data.taskSetReset-and$lockedValidated.Data.taskSetReset.phase-cne'completed'){
         $reset=$lockedValidated.Data.taskSetReset;$chains=if($reset.phase-in@('finalized','runtime-prepared','switched','runtime-committed')){$reset.finalActiveChains}else{$reset.initialActiveChains}
         $retired=@([string]$reset.expectedController.threadId)+@($reset.expectedProjectBindings|ForEach-Object{[string]$_.entryThreadId})+@([string]$reset.fromTaskSetId)
