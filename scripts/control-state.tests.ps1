@@ -60,12 +60,16 @@ function Wait-TestProcess {
 }
 
 function Start-MutexHolder {
-  param([string]$Root, [string]$SignalPath, [int]$HoldMilliseconds, [bool]$Abandon)
+  param([string]$Root, [string]$SignalPath, [int]$HoldMilliseconds, [bool]$Abandon, [AllowNull()][string]$ReleasePath = $null)
   $name = 'Local\onboard-code-projects-' + (Get-Hash $utf8.GetBytes($Root.ToUpperInvariant()))
   $escapedName = $name.Replace("'", "''")
   $escapedSignal = $SignalPath.Replace("'", "''")
   $tail = if ($Abandon) { '[Environment]::Exit(0)' } else { '$mutex.ReleaseMutex(); $mutex.Dispose()' }
-  $command = "`$mutex = New-Object Threading.Mutex(`$false, '$escapedName'); `$mutex.WaitOne() | Out-Null; [IO.File]::WriteAllText('$escapedSignal', 'ready'); Start-Sleep -Milliseconds $HoldMilliseconds; $tail"
+  $wait = if ([string]::IsNullOrWhiteSpace($ReleasePath)) { "Start-Sleep -Milliseconds $HoldMilliseconds" } else {
+    $escapedRelease = $ReleasePath.Replace("'", "''")
+    "`$watch = [Diagnostics.Stopwatch]::StartNew(); while (-not (Test-Path -LiteralPath '$escapedRelease' -PathType Leaf) -and `$watch.ElapsedMilliseconds -lt $HoldMilliseconds) { Start-Sleep -Milliseconds 25 }"
+  }
+  $command = "`$mutex = New-Object Threading.Mutex(`$false, '$escapedName'); `$mutex.WaitOne() | Out-Null; [IO.File]::WriteAllText('$escapedSignal', 'ready'); $wait; $tail"
   $process = Start-TestPowerShell $command
   $watch = [Diagnostics.Stopwatch]::StartNew()
   while (-not (Test-Path -LiteralPath $SignalPath -PathType Leaf) -and $watch.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 50 }
@@ -1105,6 +1109,90 @@ try {
     }
     finally { Set-Acl -LiteralPath $writeBlockedRoot -AclObject $originalAcl }
   }
+
+  $prepareMutexFailures = @()
+  try {
+    $prepareRaceRoot = Join-Path $testRoot 'prepare-race-controller'
+    $prepareRaceBindings = @(1..300 | ForEach-Object {
+      [pscustomobject][ordered]@{
+        entryThreadId=('prepare-race-entry-{0:D3}-' -f $_) + ('e' * 96)
+        codexProjectId=('prepare-race-project-{0:D3}-' -f $_) + ('p' * 96)
+        hostId=('prepare-race-host-{0:D3}-' -f $_) + ('h' * 96)
+        projectRoot=('D:\prepare-race-project-{0:D3}' -f $_)
+      }
+    })
+    $prepareRaceHash = Write-Manifest $prepareRaceRoot $null $null $prepareRaceBindings 2
+    $prepareRaceManifestHash = Get-Hash ([IO.File]::ReadAllBytes((Join-Path $prepareRaceRoot '.codex-controller.json')))
+    $prepareRacePayload = ([ordered]@{ operationId='op-prepare-race'; codexProjectId='controller-project'; hostId='host-1'; projectRoot=$prepareRaceRoot; startedAt='2026-08-02T00:00:02Z' } | ConvertTo-Json -Compress)
+    $prepareRaceStart = Join-Path $testRoot 'prepare-race-start.signal'
+    $prepareRaceReady = @(); $prepareRaceProcesses = @(); $prepareRaceOutputs = @()
+    try {
+      foreach ($index in 1..2) {
+        $ready = Join-Path $testRoot ("prepare-race-$index.ready")
+        $prepareRaceReady += $ready
+        $command = '[IO.File]::WriteAllText(' + (Get-EncodedStringExpression $ready) + ", 'ready'); while (-not (Test-Path -LiteralPath " + (Get-EncodedStringExpression $prepareRaceStart) + ' -PathType Leaf)) { Start-Sleep -Milliseconds 10 }; & ' +
+          (Get-EncodedStringExpression $subject) + ' -Action PrepareCandidate -ControllerRoot ' + (Get-EncodedStringExpression $prepareRaceRoot) +
+          ' -ExpectedHash ' + (Get-EncodedStringExpression $prepareRaceHash) + ' -Operation set-task-intent -PayloadJson ' + (Get-EncodedStringExpression $prepareRacePayload) + '; exit $LASTEXITCODE'
+        $started = Start-TestPowerShell $command $true
+        $prepareRaceProcesses += [pscustomobject]@{ Process=$started; Stdout=$started.StandardOutput.ReadToEndAsync(); Stderr=$started.StandardError.ReadToEndAsync() }
+      }
+      $readyWatch = [Diagnostics.Stopwatch]::StartNew()
+      while (@($prepareRaceReady | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0 -and $readyWatch.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 10 }
+      Assert-True (@($prepareRaceReady | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count -eq 2) 'Concurrent Prepare workers must reach the shared start barrier'
+      [IO.File]::WriteAllText($prepareRaceStart, 'go')
+      foreach ($started in $prepareRaceProcesses) {
+        if (-not $started.Process.WaitForExit(20000)) { throw 'Concurrent Prepare did not exit within 20 seconds' }
+        $stdout = $started.Stdout.GetAwaiter().GetResult(); $stderr = $started.Stderr.GetAwaiter().GetResult()
+        Assert-True ([string]::IsNullOrWhiteSpace($stderr)) 'Concurrent Prepare must not emit raw stderr'
+        $result = $stdout.Trim() | ConvertFrom-Json -ErrorAction Stop
+        Assert-True (($result.status -ceq 'prepared' -and $started.Process.ExitCode -eq 0) -or ($result.status -ceq 'conflict' -and $started.Process.ExitCode -eq 1)) 'Concurrent Prepare exit must match its JSON status'
+        $prepareRaceOutputs += $result
+      }
+    }
+    finally { foreach ($started in $prepareRaceProcesses) { Stop-TestProcess $started.Process } }
+    $prepareRaceCandidates = @(Get-ChildItem -LiteralPath $prepareRaceRoot -Force | Where-Object { $_.Name -cmatch '^\.codex-controller\.[0-9a-f]{32}\.tmp$' })
+    $prepareRaceCandidateCount = $prepareRaceCandidates.Count
+    $prepareRaceManifestUnchanged = (Get-Hash ([IO.File]::ReadAllBytes((Join-Path $prepareRaceRoot '.codex-controller.json')))) -ceq $prepareRaceManifestHash
+    foreach ($candidate in $prepareRaceCandidates) {
+      $removed = Invoke-State RemoveCandidate $prepareRaceRoot '' '' '' $candidate.FullName (Get-Hash ([IO.File]::ReadAllBytes($candidate.FullName))) $true
+      Assert-State $removed removed 0 'controller-candidate-removed'
+    }
+    $prepareRaceRecovered = Prepare $prepareRaceRoot $prepareRaceHash 'set-task-intent' ([ordered]@{ operationId='op-prepare-race-recovered'; codexProjectId='controller-project'; hostId='host-1'; projectRoot=$prepareRaceRoot; startedAt='2026-08-02T00:00:03Z' })
+    Assert-State $prepareRaceRecovered prepared 0 'controller-candidate-prepared'
+    Assert-State (Invoke-State RemoveCandidate $prepareRaceRoot '' '' '' $prepareRaceRecovered.Result.candidatePath $prepareRaceRecovered.Result.candidateHash $true) removed 0 'controller-candidate-removed'
+    Assert-True (@($prepareRaceOutputs | Where-Object { $_.status -ceq 'prepared' }).Count -eq 1) 'Exactly one concurrent Prepare may succeed for one ExpectedHash'
+    Assert-True (@($prepareRaceOutputs | Where-Object { $_.status -ceq 'conflict' }).Count -eq 1) 'The losing concurrent Prepare must fail closed'
+    Assert-True ($prepareRaceCandidateCount -eq 1) 'Concurrent Prepare must leave exactly one recoverable candidate'
+    Assert-True $prepareRaceManifestUnchanged 'Concurrent Prepare must not change the canonical manifest'
+    $script:scenarioCount += 2
+  }
+  catch { $prepareMutexFailures += "concurrent Prepare: $($_.Exception.Message)" }
+
+  try {
+    $prepareHeldRoot = Join-Path $testRoot 'prepare-held-controller'
+    $prepareHeldHash = Write-Manifest $prepareHeldRoot
+    $prepareHeldManifestHash = Get-Hash ([IO.File]::ReadAllBytes((Join-Path $prepareHeldRoot '.codex-controller.json')))
+    $prepareHeldSignal = Join-Path $testRoot 'prepare-held-mutex.signal'
+    $prepareHeldRelease = Join-Path $testRoot 'prepare-held-mutex.release'
+    $prepareHeldHolder = Start-MutexHolder $prepareHeldRoot $prepareHeldSignal 20000 $false $prepareHeldRelease
+    try {
+      $prepareWhileHeld = Prepare $prepareHeldRoot $prepareHeldHash 'set-task-intent' ([ordered]@{ operationId='op-prepare-held'; codexProjectId='controller-project'; hostId='host-1'; projectRoot=$prepareHeldRoot; startedAt='2026-08-02T00:00:03Z' })
+    }
+    finally {
+      [IO.File]::WriteAllText($prepareHeldRelease, 'release')
+      Wait-TestProcess $prepareHeldHolder 20000 'Prepare mutex holder did not exit within 20 seconds'
+    }
+    $prepareHeldCandidates = @(Get-ChildItem -LiteralPath $prepareHeldRoot -Force | Where-Object { $_.Name -cmatch '^\.codex-controller\.[0-9a-f]{32}\.tmp$' })
+    $prepareHeldCandidateCount = $prepareHeldCandidates.Count
+    foreach ($candidate in $prepareHeldCandidates) {
+      Assert-State (Invoke-State RemoveCandidate $prepareHeldRoot '' '' '' $candidate.FullName (Get-Hash ([IO.File]::ReadAllBytes($candidate.FullName))) $true) removed 0 'controller-candidate-removed'
+    }
+    Assert-State $prepareWhileHeld conflict 1 'controller-mutex-timeout'
+    Assert-True ($prepareHeldCandidateCount -eq 0) 'Prepare must not create a candidate while another root writer holds the mutex'
+    Assert-True ((Get-Hash ([IO.File]::ReadAllBytes((Join-Path $prepareHeldRoot '.codex-controller.json')))) -ceq $prepareHeldManifestHash) 'Timed-out Prepare must not change the canonical manifest'
+  }
+  catch { $prepareMutexFailures += "mutex-held Prepare: $($_.Exception.Message)" }
+  if ($prepareMutexFailures.Count -gt 0) { throw ($prepareMutexFailures -join '; ') }
 
   $timeoutCandidate = Prepare $root $hash 'set-task-intent' ([ordered]@{ operationId='op-timeout'; codexProjectId='controller-project'; hostId='host-1'; projectRoot=$projectRoot; startedAt='2026-08-02T00:00:03Z' })
   Assert-State $timeoutCandidate prepared 0 'controller-candidate-prepared'

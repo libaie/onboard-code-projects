@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an explicitly authorized, recoverable controller task-set reset that preserves bounded sanitized handoffs while replacing long-lived controller and project entry tasks.
+- Harden reset cutover against concurrent candidate creation, reused operation IDs, CHAIN/runtime races, incomplete evidence, and interrupted seal recovery.
 - Add guarded initialization and state management for an optional generic controller.
 - Add durable controller-task recovery, exact project/task identity rules, and v2 controller results.
 - Preserve legacy trusted adapters, resolve junction aliases before overlap checks, and add explicit stale-binding recovery.

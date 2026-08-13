@@ -24,6 +24,14 @@ function Get-Hash {
   finally { $sha.Dispose() }
 }
 
+function Get-TreeFingerprint {
+  param([string]$Root)
+  $rows=@(Get-ChildItem -LiteralPath $Root -File -Recurse -Force|Sort-Object FullName|ForEach-Object{
+    $_.FullName.Substring($Root.Length).TrimStart('\').Replace('\','/')+[char]0+(Get-Hash ([IO.File]::ReadAllBytes($_.FullName)))
+  })
+  return Get-Hash $utf8.GetBytes(($rows-join([char]0)))
+}
+
 function Get-TaskSetId {
   param([string]$Root,[string]$FromTaskSetId,[string]$OperationId)
   $identity=@('task-set-reset-v1',([IO.Path]::GetFullPath($Root).TrimEnd('\').ToLowerInvariant()),$FromTaskSetId,$OperationId)
@@ -422,6 +430,111 @@ function New-ArchiveEvidencePayload {
   }
 }
 
+function Complete-SecondReset {
+  param([string]$Root,[string]$ProjectARoot,[string]$ProjectBRoot,[string]$ExpectedHash,[string]$FromTaskSetId)
+  $operationId='reset-op-2';$toTaskSetId=Get-TaskSetId $Root $FromTaskSetId $operationId
+  $plan=[pscustomobject][ordered]@{
+    operationId=$operationId;fromTaskSetId=$FromTaskSetId;toTaskSetId=$toTaskSetId
+    coordinator=[pscustomobject][ordered]@{threadId='coordinator-task';hostId='host-external'}
+    expectedController=[pscustomobject][ordered]@{threadId='controller-new';codexProjectId='controller-project';hostId='host-1';projectRoot=$Root}
+    expectedProjectBindings=@(
+      [pscustomobject][ordered]@{entryThreadId='project-A-new';codexProjectId='project-A';hostId='host-1';projectRoot=$ProjectARoot},
+      [pscustomobject][ordered]@{entryThreadId='project-B-new';codexProjectId='project-B';hostId='host-1';projectRoot=$ProjectBRoot}
+    )
+    targets=@(
+      [pscustomobject][ordered]@{kind='controller';projectRoot=$Root;creationOperationId='create-controller-next';expectedCodexProjectId='controller-project';expectedHostId='host-1'},
+      [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectARoot;creationOperationId='create-project-A-next';expectedCodexProjectId='project-A';expectedHostId='host-1'},
+      [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectBRoot;creationOperationId='create-project-B-next';expectedCodexProjectId='project-B';expectedHostId='host-1'}
+    )
+  }
+  Assert-State (Invoke-State PlanTaskSetReset $Root '' '' $plan) verified 0 'controller-task-set-reset-planned'
+  $planHash=Get-TaskSetPlanHash $plan
+  $initialRuntime=[pscustomobject][ordered]@{
+    state='controller-replacement-read';controllerRoot=$Root;controllerThreadId='controller-new';hostId='host-1';replacementState='legacy'
+    operationId='reset-op-1';replacementSetHash=$null;oldControllerThreadId='controller-old';oldHostId='host-1';newControllerThreadId='controller-new';newHostId='host-1'
+    manifestPreparedHash=$null;prepareToken=$null;manifestSwitchedHash=$null;preparedAt=$null;committedAt='2026-08-13T00:09:00Z'
+    activeDispatchCount=0;unacknowledgedReceiptCount=0
+    fenceState='prepared';fenceOperationId=$operationId;fencePlanHash=$planHash;fenceManifestExpectedHash=$ExpectedHash;fencePreparedAt='2026-08-14T00:00:25Z';fenceCompletedManifestHash=$null;fenceCompletedAt=$null
+    wakeWorkerState='none';wakeWorkerOperationId=$null;wakeWorkerThreadId=$null;wakeWorkerClientThreadId=$null
+    wakeAutomationState='none';wakeAutomationOperationId=$null;wakeAutomationId=$null
+  }
+  $prepare=$plan|ConvertTo-Json -Depth 20 -Compress|ConvertFrom-Json
+  Add-Member -InputObject $prepare -NotePropertyName planHash -NotePropertyValue $planHash
+  $handoffSummaries=@('Controller second initial handoff','Project A second initial handoff','Project B second initial handoff')
+  $handoffOldest=@('c-3','a-3','b-3');$handoffNewest=@('c-4','a-4','b-4')
+  for($index=0;$index-lt$prepare.targets.Count;$index++){
+    Add-Member -InputObject $prepare.targets[$index] -NotePropertyName handoff -NotePropertyValue (New-Handoff $handoffSummaries[$index] $handoffOldest[$index] $handoffNewest[$index] 2 '2026-08-14T00:00:20Z')
+  }
+  Add-Member -InputObject $prepare -NotePropertyName initialActiveChains -NotePropertyValue @()
+  Add-Member -InputObject $prepare -NotePropertyName initialExternalQuiescence -NotePropertyValue (New-ExternalQuiescence '2026-08-14T00:00:30Z' $initialRuntime)
+  Add-Member -InputObject $prepare -NotePropertyName initialEvidenceHash -NotePropertyValue (Get-TaskSetEvidenceHash $prepare.targets @() $prepare.initialExternalQuiescence @())
+  Add-Member -InputObject $prepare -NotePropertyName preparedAt -NotePropertyValue '2026-08-14T00:01:00Z'
+  $applied=Mutate $Root $ExpectedHash 'prepare-task-set-reset' $prepare;$hash=[string]$applied.Result.resultHash
+
+  foreach($issued in @(
+    [ordered]@{operationId=$operationId;kind='project';projectRoot=$ProjectARoot;creationOperationId='create-project-A-next';issuedAt='2026-08-14T00:02:00Z'},
+    [ordered]@{operationId=$operationId;kind='project';projectRoot=$ProjectBRoot;creationOperationId='create-project-B-next';issuedAt='2026-08-14T00:02:10Z'},
+    [ordered]@{operationId=$operationId;kind='controller';projectRoot=$Root;creationOperationId='create-controller-next';issuedAt='2026-08-14T00:02:20Z'}
+  )){$applied=Mutate $Root $hash 'record-task-set-creation-issued' $issued;$hash=[string]$applied.Result.resultHash}
+  foreach($replacement in @(
+    [ordered]@{operationId=$operationId;kind='project';projectRoot=$ProjectARoot;threadId='project-A-next';codexProjectId='project-A';hostId='host-1'},
+    [ordered]@{operationId=$operationId;kind='project';projectRoot=$ProjectBRoot;threadId='project-B-next';codexProjectId='project-B';hostId='host-1'},
+    [ordered]@{operationId=$operationId;kind='controller';projectRoot=$Root;threadId='controller-next';codexProjectId='controller-project';hostId='host-1'}
+  )){$applied=Mutate $Root $hash 'record-task-set-replacement' $replacement;$hash=[string]$applied.Result.resultHash}
+  foreach($bootstrap in @(
+    (New-BootstrapEvidencePayload 'project' $ProjectARoot (New-BootstrapProof 'project-A-next' 'project-A' 'host-1' $ProjectARoot 'create-project-A-next' '2026-08-14T00:03:10Z')),
+    (New-BootstrapEvidencePayload 'project' $ProjectBRoot (New-BootstrapProof 'project-B-next' 'project-B' 'host-1' $ProjectBRoot 'create-project-B-next' '2026-08-14T00:03:20Z')),
+    (New-BootstrapEvidencePayload 'controller' $Root (New-BootstrapProof 'controller-next' 'controller-project' 'host-1' $Root 'create-controller-next' '2026-08-14T00:03:30Z'))
+  )){$bootstrap.operationId=$operationId;$applied=Mutate $Root $hash 'record-task-set-bootstrap-proof' $bootstrap;$hash=[string]$applied.Result.resultHash}
+
+  $finalController=New-Handoff 'Controller second final handoff' 'c-3' 'c-5' 3 '2026-08-14T00:05:20Z'
+  $finalA=New-Handoff 'Project A second final handoff' 'a-3' 'a-5' 3 '2026-08-14T00:05:00Z'
+  $finalB=New-Handoff 'Project B second final handoff' 'b-3' 'b-5' 3 '2026-08-14T00:05:10Z'
+  $archives=@(
+    (New-ArchiveEvidencePayload 'project' (New-ArchiveSnapshot 'project-A-new' 'project-A' 'host-1' $ProjectARoot $finalA) '2026-08-14T00:04:00Z'),
+    (New-ArchiveEvidencePayload 'project' (New-ArchiveSnapshot 'project-B-new' 'project-B' 'host-1' $ProjectBRoot $finalB) '2026-08-14T00:04:10Z'),
+    (New-ArchiveEvidencePayload 'controller' (New-ArchiveSnapshot 'controller-new' 'controller-project' 'host-1' $Root $finalController) '2026-08-14T00:04:20Z')
+  )
+  foreach($archive in $archives){$archive.operationId=$operationId;$applied=Mutate $Root $hash 'record-task-set-archive' $archive;$hash=[string]$applied.Result.resultHash}
+  $archives=@($applied.Result.data.taskSetReset.archives)
+  $finalTargets=@(
+    [pscustomobject][ordered]@{kind='controller';projectRoot=$Root;handoff=$finalController},
+    [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectARoot;handoff=$finalA},
+    [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectBRoot;handoff=$finalB}
+  )
+  $finalQuiet=New-ExternalQuiescence '2026-08-14T00:05:30Z' $initialRuntime
+  $finalEvidence=New-FinalEvidencePayload $finalTargets @() $finalQuiet $archives '2026-08-14T00:06:00Z';$finalEvidence.operationId=$operationId
+  $applied=Mutate $Root $hash 'record-task-set-final-evidence' $finalEvidence;$hash=[string]$applied.Result.resultHash
+  foreach($standby in @(
+    (New-StandbyEvidencePayload 'project' $ProjectARoot (New-StandbyProof 'project-A-next' 'project-A' 'host-1' $ProjectARoot $finalA '2026-08-14T00:06:10Z')),
+    (New-StandbyEvidencePayload 'project' $ProjectBRoot (New-StandbyProof 'project-B-next' 'project-B' 'host-1' $ProjectBRoot $finalB '2026-08-14T00:06:20Z')),
+    (New-StandbyEvidencePayload 'controller' $Root (New-StandbyProof 'controller-next' 'controller-project' 'host-1' $Root $finalController '2026-08-14T00:06:30Z'))
+  )){$standby.operationId=$operationId;$applied=Mutate $Root $hash 'record-task-set-standby-proof' $standby;$hash=[string]$applied.Result.resultHash}
+
+  $replacementSet=@(
+    [pscustomobject][ordered]@{kind='controller';projectRoot=$Root;threadId='controller-next';codexProjectId='controller-project';hostId='host-1'},
+    [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectARoot;threadId='project-A-next';codexProjectId='project-A';hostId='host-1'},
+    [pscustomobject][ordered]@{kind='project';projectRoot=$ProjectBRoot;threadId='project-B-next';codexProjectId='project-B';hostId='host-1'}
+  )
+  $replacementSetHash=Get-Hash $utf8.GetBytes(($replacementSet|ConvertTo-Json -Depth 6 -Compress));$manifestPreparedHash=$hash;$runtimePrepareToken='4'*64
+  $runtimePrepared=New-RuntimeReadback $Root 'prepared' $replacementSetHash $manifestPreparedHash $runtimePrepareToken $null '2026-08-14T00:07:00Z' $null $planHash $ExpectedHash
+  $runtimePrepared.controllerThreadId='controller-new';$runtimePrepared.operationId=$operationId;$runtimePrepared.oldControllerThreadId='controller-new';$runtimePrepared.newControllerThreadId='controller-next';$runtimePrepared.fenceOperationId=$operationId;$runtimePrepared.fencePreparedAt='2026-08-14T00:00:25Z'
+  $runtimeEvidence=New-RuntimeEvidencePayload $runtimePrepared;$runtimeEvidence.operationId=$operationId
+  $applied=Mutate $Root $hash 'record-task-set-runtime-prepared' $runtimeEvidence;$hash=[string]$applied.Result.resultHash
+  $switch=[ordered]@{operationId=$operationId;replacementSetHash=$replacementSetHash;runtimePrepareToken=$runtimePrepareToken;switchedAt='2026-08-14T00:08:00Z'}
+  $applied=Mutate $Root $hash 'switch-task-set' $switch;$hash=[string]$applied.Result.resultHash
+  $runtimeCommitted=New-RuntimeReadback $Root 'committed' $replacementSetHash $manifestPreparedHash $runtimePrepareToken $hash '2026-08-14T00:07:00Z' '2026-08-14T00:09:00Z' $planHash $ExpectedHash
+  $runtimeCommitted.controllerThreadId='controller-next';$runtimeCommitted.operationId=$operationId;$runtimeCommitted.oldControllerThreadId='controller-new';$runtimeCommitted.newControllerThreadId='controller-next';$runtimeCommitted.fenceOperationId=$operationId;$runtimeCommitted.fencePreparedAt='2026-08-14T00:00:25Z'
+  $runtimeEvidence=New-RuntimeEvidencePayload $runtimeCommitted;$runtimeEvidence.operationId=$operationId
+  $applied=Mutate $Root $hash 'record-task-set-runtime-committed' $runtimeEvidence;$hash=[string]$applied.Result.resultHash
+  $applied=Mutate $Root $hash 'complete-task-set-reset' ([ordered]@{operationId=$operationId;completedAt='2026-08-14T00:10:00Z'});$hash=[string]$applied.Result.resultHash
+  $completedFence=New-CompletedFenceReadback $Root $planHash $ExpectedHash $hash
+  $completedFence.controllerThreadId='controller-next';$completedFence.operationId=$operationId;$completedFence.oldControllerThreadId='controller-new';$completedFence.newControllerThreadId='controller-next';$completedFence.committedAt='2026-08-14T00:09:00Z';$completedFence.fenceOperationId=$operationId;$completedFence.fencePreparedAt='2026-08-14T00:00:25Z';$completedFence.fenceCompletedAt='2026-08-14T00:10:01Z'
+  $recovery=[pscustomobject][ordered]@{runtimeReadback=$completedFence;runtimeReadbackHash=(Get-Hash $utf8.GetBytes(($completedFence|ConvertTo-Json -Depth 20 -Compress)))}
+  Assert-State (Invoke-State RecoverTaskSetResetSeal $Root '' '' $recovery) applied 0 'controller-task-set-reset-seal-recovered'
+  return [pscustomobject]@{Hash=$hash;Plan=$plan;CompletedFence=$completedFence}
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('tsr-' + [guid]::NewGuid().ToString('N'))
 
 try {
@@ -753,6 +866,51 @@ try {
   $completeReplay=Mutate $controllerRoot $hash 'complete-task-set-reset' $complete;$hash=[string]$completeReplay.Result.resultHash
   $completeThird=$complete|ConvertTo-Json -Compress|ConvertFrom-Json;$completeThird.completedAt='2026-08-13T00:10:01Z'
   Assert-State (Prepare $controllerRoot $hash 'complete-task-set-reset' $completeThird) conflict 1 'controller-task-state-conflict'
+
+  $secondReset=Complete-SecondReset $controllerRoot $projectARoot $projectBRoot $hash $preparePayload.toTaskSetId;$hash=[string]$secondReset.Hash
+  $history=Invoke-State ReadTaskSetResetHistory $controllerRoot
+  Assert-State $history verified 0 'controller-task-set-reset-history-read'
+  Assert-True ($history.Result.data.count-eq2-and$history.Result.data.items[0].operationId-ceq'reset-op-1'-and$history.Result.data.items[1].operationId-ceq'reset-op-2') 'Two completed resets must be sealed in immutable order before reuse is attempted'
+
+  $reusePlan=$secondReset.Plan|ConvertTo-Json -Depth 20 -Compress|ConvertFrom-Json
+  $reusePlan.operationId='reset-op-1';$reusePlan.fromTaskSetId=$secondReset.Plan.toTaskSetId;$reusePlan.toTaskSetId=Get-TaskSetId $controllerRoot $reusePlan.fromTaskSetId $reusePlan.operationId
+  $reusePlan.expectedController.threadId='controller-next'
+  $reusePlan.expectedProjectBindings[0].entryThreadId='project-A-next';$reusePlan.expectedProjectBindings[1].entryThreadId='project-B-next'
+  $reusePlan.targets[0].creationOperationId='create-controller-reused';$reusePlan.targets[1].creationOperationId='create-project-A-reused';$reusePlan.targets[2].creationOperationId='create-project-B-reused'
+  $reusePrepare=$reusePlan|ConvertTo-Json -Depth 20 -Compress|ConvertFrom-Json;$reusePlanHash=Get-TaskSetPlanHash $reusePlan
+  Add-Member -InputObject $reusePrepare -NotePropertyName planHash -NotePropertyValue $reusePlanHash
+  $reuseSummaries=@('Controller reused operation handoff','Project A reused operation handoff','Project B reused operation handoff')
+  for($index=0;$index-lt$reusePrepare.targets.Count;$index++){
+    Add-Member -InputObject $reusePrepare.targets[$index] -NotePropertyName handoff -NotePropertyValue (New-Handoff $reuseSummaries[$index] @('c-5','a-5','b-5')[$index] @('c-6','a-6','b-6')[$index] 2 '2026-08-15T00:00:20Z')
+  }
+  $reuseRuntime=[pscustomobject][ordered]@{
+    state='controller-replacement-read';controllerRoot=$controllerRoot;controllerThreadId='controller-next';hostId='host-1';replacementState='legacy'
+    operationId='reset-op-2';replacementSetHash=$null;oldControllerThreadId='controller-new';oldHostId='host-1';newControllerThreadId='controller-next';newHostId='host-1'
+    manifestPreparedHash=$null;prepareToken=$null;manifestSwitchedHash=$null;preparedAt=$null;committedAt='2026-08-14T00:09:00Z'
+    activeDispatchCount=0;unacknowledgedReceiptCount=0
+    fenceState='prepared';fenceOperationId='reset-op-1';fencePlanHash=$reusePlanHash;fenceManifestExpectedHash=$hash;fencePreparedAt='2026-08-15T00:00:25Z';fenceCompletedManifestHash=$null;fenceCompletedAt=$null
+    wakeWorkerState='none';wakeWorkerOperationId=$null;wakeWorkerThreadId=$null;wakeWorkerClientThreadId=$null
+    wakeAutomationState='none';wakeAutomationOperationId=$null;wakeAutomationId=$null
+  }
+  Add-Member -InputObject $reusePrepare -NotePropertyName initialActiveChains -NotePropertyValue @()
+  Add-Member -InputObject $reusePrepare -NotePropertyName initialExternalQuiescence -NotePropertyValue (New-ExternalQuiescence '2026-08-15T00:00:30Z' $reuseRuntime)
+  Add-Member -InputObject $reusePrepare -NotePropertyName initialEvidenceHash -NotePropertyValue (Get-TaskSetEvidenceHash $reusePrepare.targets @() $reusePrepare.initialExternalQuiescence @())
+  Add-Member -InputObject $reusePrepare -NotePropertyName preparedAt -NotePropertyValue '2026-08-15T00:01:00Z'
+
+  $manifestPath=Join-Path $controllerRoot '.codex-controller.json';$historyPath=Join-Path $controllerRoot 'state\task-set-reset-history.jsonl'
+  $manifestBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath));$historyBefore=[Convert]::ToBase64String([IO.File]::ReadAllBytes($historyPath))
+  $candidatesBefore=@(Get-ChildItem -LiteralPath $controllerRoot -Force|Where-Object{$_.Name-cmatch'^\.codex-controller\.[0-9a-f]{32}\.tmp$'}|Sort-Object Name|ForEach-Object{[pscustomobject][ordered]@{name=$_.Name;bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))}})|ConvertTo-Json -Depth 3 -Compress
+  $treeBefore=Get-TreeFingerprint $controllerRoot
+  $reusePlanCall=Invoke-State PlanTaskSetReset $controllerRoot '' '' $reusePlan
+  $reusePrepareCall=Prepare $controllerRoot $hash 'prepare-task-set-reset' $reusePrepare
+  Assert-True ($reusePlanCall.ExitCode-eq1-and$reusePlanCall.Result.status-ceq'conflict'-and$reusePlanCall.Result.reasonCode-ceq'controller-task-state-conflict'-and$reusePrepareCall.ExitCode-eq1-and$reusePrepareCall.Result.status-ceq'conflict'-and$reusePrepareCall.Result.reasonCode-ceq'controller-task-state-conflict') "Historical operationId reuse must reject Plan and Prepare before writes; got Plan $($reusePlanCall.Result.status)/$($reusePlanCall.Result.reasonCode) exit $($reusePlanCall.ExitCode), Prepare $($reusePrepareCall.Result.status)/$($reusePrepareCall.Result.reasonCode) exit $($reusePrepareCall.ExitCode)"
+  $scenarioCount+=2
+  $candidatesAfter=@(Get-ChildItem -LiteralPath $controllerRoot -Force|Where-Object{$_.Name-cmatch'^\.codex-controller\.[0-9a-f]{32}\.tmp$'}|Sort-Object Name|ForEach-Object{[pscustomobject][ordered]@{name=$_.Name;bytes=[Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))}})|ConvertTo-Json -Depth 3 -Compress
+  Assert-True ((Get-TreeFingerprint $controllerRoot)-ceq$treeBefore) 'Historical operationId rejection must leave the complete controller state tree byte-identical'
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($manifestPath))-ceq$manifestBefore) 'Historical operationId rejection must not change manifest bytes'
+  Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($historyPath))-ceq$historyBefore) 'Historical operationId rejection must not change immutable history bytes'
+  Assert-True ($candidatesAfter-ceq$candidatesBefore) 'Historical operationId rejection must not create or change candidate bytes'
+
   $extraRoot=Join-Path $testRoot 'post-reset-extra';[IO.Directory]::CreateDirectory($extraRoot)|Out-Null
   Assert-State (Prepare $controllerRoot $hash 'register-project' ([ordered]@{entryThreadId='extra-task';codexProjectId='extra-project';hostId='host-1';projectRoot=$extraRoot})) prepared 0 'controller-candidate-prepared'
 
