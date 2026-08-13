@@ -225,7 +225,7 @@ Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*(?:Windows-first|Windows[^\r\n]{0,
   'Chinese README first screen must state the Windows-first Codex Desktop multi-repository workflow-isolation Skill category'
 Assert-Contains $zhPreamble '(?is)(?:2\s*\+|2\s*\u4e2a\u53ca\u4ee5\u4e0a|\u4e24\u4e2a\u53ca\u4ee5\u4e0a).{0,20}\u4ed3\u5e93' `
   'Chinese README first screen must state the two-or-more-repository trigger'
-Assert-Contains $zhPreamble '(?is)\u7cbe\u786e\u6839\u76ee\u5f55.{0,160}\u5df2\u6838\u9a8c.{0,160}\u9879\u76ee\u7ed1\u5b9a\u5165\u53e3\u4efb\u52a1.{0,300}codebase-memory.{0,300}\u53ef\u9009\u4e2d\u63a7' `
+Assert-Contains $zhPreamble '(?is)\u7cbe\u786e\u6839\u76ee\u5f55.{0,160}(?:\u5df2\u6838\u9a8c|\u7ecf\u8fc7\u6838\u9a8c).{0,160}\u9879\u76ee(?:\u7ed1\u5b9a)?\u5165\u53e3\u4efb\u52a1.{0,300}codebase-memory.{0,300}\u53ef\u9009\u4e2d\u63a7' `
   'Chinese README first screen must state the exact-root tasks, index, and optional-controller output'
 foreach ($boundary in @(
   '(?is)(?:\u4e0d\u4f1a|\u4e0d\u80fd|\u65e0\u6cd5).{0,80}(?:\u521b\u5efa|\u4fdd\u5b58).{0,40}Codex.{0,20}\u9879\u76ee',

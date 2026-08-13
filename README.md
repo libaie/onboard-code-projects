@@ -8,7 +8,14 @@
 
 Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-Keep each repository in its own verified Codex project task instead of mixing several codebases, instructions, branches, and permissions in one long conversation. An optional controller coordinates work that crosses repositories.
+onboard-code-projects is a Windows-first Codex Desktop multi-repository workflow-isolation Skill.
+
+- **Use when:** work crosses two or more related repositories.
+- **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination.
+- **It does not:** create saved Codex projects or approve permissions.
+- **It is not:** a security sandbox, and it does not deploy software.
+
+This reduces the risk of repository instructions, branches, permissions, evidence, and edits being mixed in one long conversation.
 
 > **Preview:** Windows and Codex Desktop are the supported release surface. Other platforms are not yet release-tested end to end.
 
@@ -24,17 +31,25 @@ Keep each repository in its own verified Codex project task instead of mixing se
 
 Use it when a feature, incident, or release crosses two or more repositories with different instructions, branch rules, tests, or write boundaries. For ordinary single-repository work, use that repository's project task directly.
 
-### How this differs from subagents
+### Choose the right boundary
 
-Subagents divide short-lived work inside one active task. This Skill creates durable, project-bound entry tasks that can be reused across later work. A project task may still use subagents internally; the two approaches are complementary.
+| Option | Context and lifetime | Best use |
+| --- | --- | --- |
+| Single long conversation | Several repositories share one growing context. | A quick, low-risk check where repository rules do not differ. |
+| Subagent | Short-lived parallel work inside the current task. | Independent subtasks that do not need a reusable project identity. |
+| This Skill | One exact-root, reusable entry task per repository; the optional controller keeps only cross-project facts. | Features, incidents, and releases that cross repository boundaries. |
 
-## What it creates
+Project entry tasks may still use subagents internally; the two approaches are complementary.
+
+## What you get
 
 ```mermaid
 flowchart LR
-    U["User"] --> C["Optional controller<br/>cross-project work"]
-    C --> A["Project A entry task"]
-    C --> B["Project B entry task"]
+    U["User"] --> A["Project A entry task"]
+    U --> B["Project B entry task"]
+    U -.->|optional cross-project work| C["Controller"]
+    C --> A
+    C --> B
     A --> RA["Repository A + index"]
     B --> RB["Repository B + index"]
 ```
@@ -96,7 +111,7 @@ dispatchReturnMode: foreground
 Initialize the controller and register the project entry tasks.
 ```
 
-The Skill-only path uses `foreground` because `$skill-installer` does not activate the plugin Stop Hook. Install the plugin through a trusted source before selecting `receipts` or `receipts-and-wake`.
+Without the plugin Stop Hook, use `native-callback` when available; otherwise use `foreground`. Install the plugin through a trusted source before selecting `receipts` or `receipts-and-wake`.
 
 After setup, send cross-project work to the controller in ordinary language:
 
