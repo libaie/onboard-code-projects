@@ -362,6 +362,7 @@ async function requireTaskSetResetSeal(controllerRoot, operationId, finalManifes
   if (createHash("sha256").update(manifestBytes).digest("hex") !== finalManifestHash) {
     throw new Error("task-set-reset-seal-conflict");
   }
+  return marker;
 }
 
 function validateWakeAutomation(value) {
@@ -777,6 +778,7 @@ export async function prepareTaskSetResetFence(input) {
         };
       }
       if (current.phase === "prepared") throw new Error("task-set-reset-fence-conflict");
+      requireResetFenceMutationAllowed(controller);
     }
     if (controller.taskSetReplacement !== null) throw new Error("controller-replacement-pending");
     if (controller.dispatches.length !== 0) throw new Error("controller-not-quiescent");
@@ -1023,13 +1025,14 @@ export async function completeTaskSetResetFence(input) {
         completedAt: fence.completedAt,
       };
     }
-    await requireTaskSetResetSeal(root, operationId, completedManifestHash);
+    const seal = await requireTaskSetResetSeal(root, operationId, completedManifestHash);
     const replacement = controller.taskSetReplacement;
     if (!replacement || replacement.phase !== "committed" || replacement.operationId !== operationId ||
         controller.controllerThreadId !== replacement.newControllerThreadId || controller.hostId !== replacement.newHostId) {
       throw new Error("controller-replacement-not-committed");
     }
-    if (compareIso(completedAt, fence.preparedAt) < 0 ||
+    if (compareIso(completedAt, seal.completedAt) < 0 ||
+        compareIso(completedAt, fence.preparedAt) < 0 ||
         compareIso(completedAt, replacement.committedAt) < 0) {
       throw new Error("task-set-reset-fence-conflict");
     }

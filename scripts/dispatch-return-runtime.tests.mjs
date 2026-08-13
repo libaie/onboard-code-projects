@@ -884,6 +884,74 @@ test("reset fence completion is exact, clears replacement, replays, and permits 
   }
 });
 
+test("a completed reset fence cannot be replaced until its seal is recovered", async () => {
+  const f = await fixture();
+  try {
+    await unregisterFixtureDispatch(f);
+    await prepareTaskSetResetFence(resetFenceInput(f));
+    const replacement = replacementInput(f);
+    const prepared = await prepareControllerReplacement(replacement);
+    await commitControllerReplacement({
+      ...replacement,
+      prepareToken: prepared.prepareToken,
+      manifestSwitchedHash: HASH_C,
+      committedAt: "2026-08-13T01:01:00.000Z",
+    });
+    const seal = await installTaskSetResetSeal(f);
+    await completeTaskSetResetFence({
+      statePath: f.statePath,
+      controllerRoot: f.controllerRoot,
+      operationId: replacement.operationId,
+      completedManifestHash: seal.finalManifestHash,
+      completedAt: "2026-08-13T01:02:00.000Z",
+    });
+    const before = await readFile(f.statePath, "utf8");
+
+    await assert.rejects(prepareTaskSetResetFence(resetFenceInput(f, {
+      operationId: "replace-controller-2",
+      planHash: HASH_B,
+      manifestExpectedHash: HASH_C,
+      preparedAt: "2026-08-13T02:00:00.000Z",
+    })), /task-set-reset-fence-pending/);
+    assert.equal(await readFile(f.statePath, "utf8"), before);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test("reset fence completion cannot precede its canonical seal timestamp", async () => {
+  const f = await fixture();
+  try {
+    await unregisterFixtureDispatch(f);
+    await prepareTaskSetResetFence(resetFenceInput(f));
+    const replacement = replacementInput(f);
+    const prepared = await prepareControllerReplacement(replacement);
+    await commitControllerReplacement({
+      ...replacement,
+      prepareToken: prepared.prepareToken,
+      manifestSwitchedHash: HASH_C,
+      committedAt: "2026-08-13T01:01:00.000Z",
+    });
+    const seal = await installTaskSetResetSeal(f, {
+      marker: { completedAt: "2026-08-13T01:01:30.1234567Z" },
+    });
+
+    await assert.rejects(completeTaskSetResetFence({
+      statePath: f.statePath,
+      controllerRoot: f.controllerRoot,
+      operationId: replacement.operationId,
+      completedManifestHash: seal.finalManifestHash,
+      completedAt: "2026-08-13T01:01:30.1234566Z",
+    }), /task-set-reset-fence-conflict/);
+    assert.equal((await readControllerReplacement({
+      statePath: f.statePath,
+      controllerRoot: f.controllerRoot,
+    })).fenceState, "prepared");
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test("reset fence completion cannot move backward within one millisecond", async () => {
   const f = await fixture();
   const precise = "2026-08-13T01:02:00.1234567Z";
@@ -1629,6 +1697,7 @@ test("a new quiescent operation advances the single committed audit slot", async
       completedManifestHash: firstSeal.finalManifestHash,
       completedAt: "2026-08-13T01:02:00.000Z",
     });
+    await rm(firstSeal.sealPath);
 
     const next = replacementInput(f, {
       operationId: "replace-controller-2",
