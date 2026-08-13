@@ -168,9 +168,29 @@ if ($controllerPolicy -match '(?is)project lane.{0,80}exact `?projectTaskId`?') 
 Assert-Contains $controllerPolicy '(?is)goal lane.{0,160}(?:keyed|identified).{0,80}`?projectRoot`?.{0,240}sealed dispatch.{0,160}exact `?projectTaskId`?' `
   'Generated controller policy must describe the actual goal-lane and sealed-dispatch identity boundary'
 
+$englishPainHeading = '## Problems this Skill solves'
+$englishPainPosition = $readme.IndexOf($englishPainHeading, [StringComparison]::Ordinal)
+if ($englishPainPosition -lt 0) { throw 'English README must retain the Problems section' }
+$englishPreamble = $readme.Substring(0, $englishPainPosition)
+Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*Windows-first)(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*(?:multi-repository|multi-repo))(?=[^\r\n]*workflow[- ]isolation)(?=[^\r\n]*\bSkill\b)[^\r\n]+$' `
+  'English README first screen must state the Windows-first Codex Desktop multi-repository workflow-isolation Skill category'
+Assert-Contains $englishPreamble '(?i)\b(?:two or more|2\+)\s+(?:related\s+)?repositories\b' `
+  'English README first screen must state the two-or-more-repository trigger'
+Assert-Contains $englishPreamble '(?is)(?:exact-root|exact root).{0,160}verified.{0,160}project-bound entry tasks.{0,300}codebase-memory.{0,300}optional controller' `
+  'English README first screen must state the exact-root tasks, index, and optional-controller output'
+foreach ($boundary in @(
+  '(?is)(?:does not|cannot|never).{0,80}(?:create|save).{0,80}saved Codex projects',
+  '(?is)(?:does not|cannot|never).{0,100}(?:approve|grant).{0,80}(?:permissions|approvals)',
+  '(?is)(?:not|isn.t).{0,40}(?:a )?(?:security|filesystem) sandbox',
+  '(?is)(?:does not|cannot|never).{0,80}deploy'
+)) { Assert-Contains $englishPreamble $boundary 'English README first screen must state all four product boundaries' }
+foreach ($row in @('Single long (?:conversation|task)', 'Subagents?', '(?:This Skill|onboard-code-projects)')) {
+  Assert-Contains $readme "(?im)^\|\s*$row\s*\|" 'English README must include a three-way Markdown comparison table'
+}
+
 Assert-InOrder $readme @(
   '## Problems this Skill solves',
-  '## What it creates',
+  '## What you get',
   '## Quick start',
   '## Git URL onboarding',
   '## How it works',
@@ -184,11 +204,13 @@ Assert-Contains $readme '(?is)## Problems this Skill solves.{0,4000}Context poll
 Assert-Contains $readme '(?is)## Quick start.{0,7000}\$skill-installer.{0,1800}\$onboard-code-projects.{0,1800}sources:.{0,1800}controllerRoot' `
   'English README quick start must cover installation, project onboarding, and optional controller setup'
 $englishQuickStart = [regex]::Match($readme, '(?is)## Quick start(?<body>.*?)(?=## Git URL onboarding)').Groups['body'].Value
-Assert-Contains $englishQuickStart '(?is)dispatchReturnMode:\s*foreground' 'A Skill-only English quick start must use foreground return without an installed Hook'
 if ($englishQuickStart -match '(?is)dispatchReturnMode:\s*receipts-and-wake') { throw 'A Skill-only English quick start must not require the plugin receipt runtime' }
+Assert-Contains $readme '(?is)(?:without|no).{0,80}(?:plugin )?(?:Stop )?Hook.{0,600}native-callback.{0,240}(?:available|supported).{0,600}(?:otherwise|unavailable|not available).{0,160}foreground' `
+  'Without the Hook, English guidance must prefer native-callback when available and otherwise use foreground'
+if ($readme -match '(?m)^## What it creates\s*$') { throw 'English README must use outcome-oriented What you get wording' }
 
 $zhPainHeading = [regex]::Unescape('## \u5b83\u89e3\u51b3\u4ec0\u4e48\u75db\u70b9')
-$zhCreatesHeading = [regex]::Unescape('## \u5b83\u4f1a\u521b\u5efa\u4ec0\u4e48')
+$zhGetHeading = [regex]::Unescape('## \u4f60\u4f1a\u5f97\u5230\u4ec0\u4e48')
 $zhQuickStartHeading = [regex]::Unescape('## \u5feb\u901f\u5f00\u59cb')
 $zhGitHeading = [regex]::Unescape('## Git URL \u63a5\u5165')
 $zhHowHeading = [regex]::Unescape('## \u5de5\u4f5c\u65b9\u5f0f')
@@ -196,9 +218,27 @@ $zhRequirementsHeading = [regex]::Unescape('## \u73af\u5883\u8981\u6c42\u4e0e\u5
 $zhPermissionsHeading = [regex]::Unescape('## \u6743\u9650\u4e0e\u672c\u5730\u6570\u636e')
 $zhTroubleshootingHeading = [regex]::Unescape('## \u5e38\u89c1\u95ee\u9898')
 $zhDocsHeading = [regex]::Unescape('## \u6587\u6863')
+$zhPainPosition = $readmeZh.IndexOf($zhPainHeading, [StringComparison]::Ordinal)
+if ($zhPainPosition -lt 0) { throw 'Chinese README must retain the pain-point section' }
+$zhPreamble = $readmeZh.Substring(0, $zhPainPosition)
+Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*(?:Windows-first|Windows[^\r\n]{0,20}\u4f18\u5148))(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*\u591a\u4ed3\u5e93)(?=[^\r\n]*\u5de5\u4f5c\u6d41\u9694\u79bb)(?=[^\r\n]*Skill)[^\r\n]+$' `
+  'Chinese README first screen must state the Windows-first Codex Desktop multi-repository workflow-isolation Skill category'
+Assert-Contains $zhPreamble '(?is)(?:2\s*\+|2\s*\u4e2a\u53ca\u4ee5\u4e0a|\u4e24\u4e2a\u53ca\u4ee5\u4e0a).{0,20}\u4ed3\u5e93' `
+  'Chinese README first screen must state the two-or-more-repository trigger'
+Assert-Contains $zhPreamble '(?is)\u7cbe\u786e\u6839\u76ee\u5f55.{0,160}\u5df2\u6838\u9a8c.{0,160}\u9879\u76ee\u7ed1\u5b9a\u5165\u53e3\u4efb\u52a1.{0,300}codebase-memory.{0,300}\u53ef\u9009\u4e2d\u63a7' `
+  'Chinese README first screen must state the exact-root tasks, index, and optional-controller output'
+foreach ($boundary in @(
+  '(?is)(?:\u4e0d\u4f1a|\u4e0d\u80fd|\u65e0\u6cd5).{0,80}(?:\u521b\u5efa|\u4fdd\u5b58).{0,40}Codex.{0,20}\u9879\u76ee',
+  '(?is)(?:\u4e0d\u4f1a|\u4e0d\u80fd|\u65e0\u6cd5|\u4e0d\u4ee3\u66ff).{0,80}(?:\u6279\u51c6|\u6388\u6743|\u6743\u9650)',
+  '(?is)(?:\u4e0d\u662f|\u4e0d\u7b49\u4e8e).{0,40}(?:\u5b89\u5168|\u6587\u4ef6\u7cfb\u7edf).{0,20}\u6c99\u7bb1',
+  '(?is)(?:\u4e0d\u4f1a|\u4e0d\u80fd|\u65e0\u6cd5).{0,80}\u90e8\u7f72'
+)) { Assert-Contains $zhPreamble $boundary 'Chinese README first screen must state all four product boundaries' }
+foreach ($row in @('\u5355\u4e00\u957f\u4f1a\u8bdd', 'Subagent(?:s)?', '\u672c Skill')) {
+  Assert-Contains $readmeZh "(?im)^\|\s*$row\s*\|" 'Chinese README must include a three-way Markdown comparison table'
+}
 Assert-InOrder $readmeZh @(
   $zhPainHeading,
-  $zhCreatesHeading,
+  $zhGetHeading,
   $zhQuickStartHeading,
   $zhGitHeading,
   $zhHowHeading,
@@ -212,8 +252,10 @@ Assert-Contains $readmeZh '(?is)## \u5b83\u89e3\u51b3\u4ec0\u4e48\u75db\u70b9.{0
 Assert-Contains $readmeZh '(?is)## \u5feb\u901f\u5f00\u59cb.{0,7000}\$skill-installer.{0,1800}\$onboard-code-projects.{0,1800}sources:.{0,1800}controllerRoot' `
   'Chinese README quick start must cover installation, project onboarding, and optional controller setup'
 $chineseQuickStart = [regex]::Match($readmeZh, '(?is)## \u5feb\u901f\u5f00\u59cb(?<body>.*?)(?=## Git URL \u63a5\u5165)').Groups['body'].Value
-Assert-Contains $chineseQuickStart '(?is)dispatchReturnMode:\s*foreground' 'A Skill-only Chinese quick start must use foreground return without an installed Hook'
 if ($chineseQuickStart -match '(?is)dispatchReturnMode:\s*receipts-and-wake') { throw 'A Skill-only Chinese quick start must not require the plugin receipt runtime' }
+Assert-Contains $readmeZh '(?is)(?:\u65e0|\u6ca1\u6709|\u672a\u5b89\u88c5).{0,80}Hook.{0,600}native-callback.{0,240}(?:\u53ef\u7528|\u652f\u6301).{0,600}(?:\u5426\u5219|\u4e0d\u53ef\u7528|\u65e0\u6cd5\u4f7f\u7528).{0,160}foreground' `
+  'Without the Hook, Chinese guidance must prefer native-callback when available and otherwise use foreground'
+if ($readmeZh -match '(?m)^## \u5b83\u4f1a\u521b\u5efa\u4ec0\u4e48\s*$') { throw 'Chinese README must use outcome-oriented wording' }
 
 foreach ($installationReadme in @($readme, $readmeZh)) {
   Assert-Contains $installationReadme '(?is)\$skill-installer.{0,500}--repo\s+libaie/onboard-code-projects.{0,300}--path\s+\..{0,300}--name\s+onboard-code-projects' `
