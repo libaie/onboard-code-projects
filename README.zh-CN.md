@@ -8,7 +8,14 @@
 
 开源仓库：[libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-让每个仓库使用独立、可核验的 Codex 项目任务，避免在一个长期会话中混合多个代码库、项目指令、分支和权限。需要跨仓库协同时，可选中控负责统一排查与验收。
+onboard-code-projects 是 Windows-first 的 Codex Desktop 多仓库工作流隔离 Skill。
+
+- **适用于：** 工作横跨两个及以上仓库。
+- **你会得到：** 绑定到精确根目录、经过核验的项目入口任务，每个仓库对应一个 `codebase-memory` 索引，以及负责跨项目协作的可选中控。
+- **它不会：** 创建或保存 Codex 项目，也不会代替用户授权或批准权限。
+- **它不是：** 安全沙箱，也不会部署软件。
+
+它解决的核心问题是：多个仓库放在同一个长期会话里，会混淆项目指令、分支、权限、证据和修改范围。
 
 > **状态：预览版。** 当前支持的发布面是 Windows 和 Codex Desktop，其他平台尚未完成发布级端到端验证。
 
@@ -24,17 +31,25 @@
 
 适用于一个功能、故障或发布涉及两个以上仓库，并且各仓库有不同项目指令、分支规则、测试命令或写权限边界的场景。普通单仓库工作直接使用该仓库的项目任务即可。
 
-### 与 subagent 的区别
+### 选择合适的上下文边界
 
-Subagent 用于拆分当前任务中的短期工作；本 Skill 创建可跨后续任务复用的项目绑定入口。项目任务内部仍可继续使用 subagent，两者可以配合使用。
+| 方式 | 上下文与生命周期 | 适合场景 |
+| --- | --- | --- |
+| 单一长会话 | 多个仓库共享一个持续增长的上下文。 | 仓库规则没有差异的快速、低风险检查。 |
+| Subagent | 当前任务内的短期并行工作。 | 不需要复用项目身份的独立子任务。 |
+| 本 Skill | 每个仓库使用一个绑定精确根目录、可复用的入口任务；可选中控只保留跨项目信息。 | 横跨多个仓库的功能、故障和发布。 |
 
-## 它会创建什么
+项目入口任务内部仍可使用 subagent，两者可以配合使用。
+
+## 你会得到什么
 
 ```mermaid
 flowchart LR
-    U["用户"] --> C["可选中控<br/>跨项目工作"]
-    C --> A["项目 A 入口任务"]
-    C --> B["项目 B 入口任务"]
+    U["用户"] --> A["项目 A 入口任务"]
+    U --> B["项目 B 入口任务"]
+    U -.->|可选的跨项目工作| C["中控"]
+    C --> A
+    C --> B
     A --> RA["仓库 A + 索引"]
     B --> RB["仓库 B + 索引"]
 ```
@@ -96,13 +111,30 @@ dispatchReturnMode: foreground
 初始化中控，并登记这些项目入口任务。
 ```
 
-仅安装 Skill 时使用 `foreground`，因为 `$skill-installer` 不会启用插件 Stop Hook。只有从可信来源安装插件后，才选择 `receipts` 或 `receipts-and-wake`。
+没有插件 Stop Hook 时，`native-callback` 可用则优先使用；否则使用 `foreground`。只有从可信来源安装插件后，才选择 `receipts` 或 `receipts-and-wake`。
 
 初始化后，直接用自然语言把跨项目问题交给中控：
 
 ```text
 全链路排查 H5 推广海报登录流程，涉及 H5、商城后端和会员服务。先只读排查，冻结共享接口契约，再把各仓库检查下发到已有项目入口，最后回传端到端证据。
 ```
+
+### 刷新长期运行的中控任务
+
+当中控及其项目入口任务需要使用新会话时，精确生成的 v3 支持可替换当前绑定的整组任务，并继承已核验的历史记录。请从被替换集合之外的独立 coordinator 任务触发；该任务最后归档。如果仍有工作未静默、无法完整读取任务历史，或中控属于自定义、旧版、已有状态存储的 v2，而不是精确生成的 v3，操作会安全阻断。
+
+```text
+resetControllerTasks: true
+Action: Plan
+
+# 检查返回的 planHash，再使用相同请求发送：
+Action: Apply
+planHash: <返回的 planHash>
+```
+
+Plan 不会写入，只授权稳定的替换范围；用户查看 Plan 期间即使任务历史变化，也无需重新批准。Apply 只接受返回的精确哈希，先创建仅含唯一创建标记、不含业务交接的待命任务，再完整核验并冻结旧历史，发送最终有界脱敏交接后才激活新任务组。系统不删除任务；如执行中断，只继续同一操作。高级行为与恢复方式见[中控运行时参考](./references/controller-runtime.md)。
+
+重置还要求 Codex 任务 API 可用，且每个替换目标都是根目录唯一的精确已保存项目；根目录有歧义或无法回读任务 cwd 时会安全阻断。
 
 ## Git URL 接入
 
@@ -147,6 +179,7 @@ Skill 只克隆到 `cloneRoot` 的新子目录，随后返回 `needs-project-add
 | `controllerName` | 否 | 默认 `Multi-Project Control Center`。 |
 | `initializeController` | 否 | 授权初始化中控脚手架。 |
 | `createControllerTask` | 否 | 授权创建中控任务。 |
+| `resetControllerTasks` | 否 | 显式请求先安全 Plan，再替换当前中控任务组。 |
 | `dispatchReturnMode` | 否 | `foreground`、`native-callback`、`receipts` 或 `receipts-and-wake`。 |
 
 高级升级和恢复输入见[中控运行时参考](./references/controller-runtime.md)。
@@ -161,7 +194,7 @@ Skill 只克隆到 `cloneRoot` 的新子目录，随后返回 `needs-project-add
 | Git | Git URL 和 Git 元数据。 |
 | OpenSSH | 仅 SSH Git URL。 |
 | Git LFS | 仅 `fullLfsCheckout: true`。 |
-| Node.js 18+ | 仅耐久 Stop 回执和自动唤醒。 |
+| Node.js 18+ | 中控任务组重置、耐久 Stop 回执和自动唤醒。 |
 
 以下 read-only 预检不会创建项目、任务、索引、中控文件或 Git 状态：
 
@@ -173,11 +206,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 
 # SSH Git URL
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireGit -RequireSsh
 # 仅完整 LFS 检出时，在适用 Git 命令后追加 -RequireLfs。
-# 耐久事件回传
+# 中控任务组重置或耐久事件回传
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireNode
 ```
 
-仅安装 Skill 时可使用项目隔离、索引、可选中控和前台监控。耐久回执需要插件 Stop Hook 与 Node.js；自动唤醒还需要 Skill 验证对应运行时能力。
+仅安装 Skill 时可使用项目隔离、索引、可选中控和前台监控。中控任务组重置需要 Node.js 18+。耐久回执需要插件 Stop Hook 与 Node.js；自动唤醒还需要 Skill 验证对应运行时能力。
 
 ## 权限与本地数据
 

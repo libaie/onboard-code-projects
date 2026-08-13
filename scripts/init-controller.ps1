@@ -60,6 +60,12 @@ function Get-Hash {
   finally { $sha.Dispose() }
 }
 
+function Get-TaskSetId {
+  param([string]$Root)
+  $identityRoot = (Resolve-PhysicalWindowsPath $Root).ToLowerInvariant()
+  return 'task-set-' + (Get-Hash ($utf8.GetBytes($identityRoot)))
+}
+
 function Test-BytesEqual {
   param([byte[]]$Left, [byte[]]$Right)
   if ($Left.Length -ne $Right.Length) { return $false }
@@ -68,7 +74,9 @@ function Test-BytesEqual {
 }
 
 function Read-CanonicalTemplates {
+  param([string]$Root)
   $bytes = [ordered]@{}
+  $manifestTemplate = $null
   try {
     foreach ($relativePath in $templatePaths) {
       $path = if ($templateSources.ContainsKey($relativePath)) { $templateSources[$relativePath] } else { Join-Path $templateRoot $relativePath }
@@ -85,11 +93,14 @@ function Read-CanonicalTemplates {
       }
       $tokens = @([regex]::Matches($text, '__[A-Z0-9_]+__') | ForEach-Object { $_.Value })
       if ($relativePath -ceq '.codex-controller.json') {
-        if ($tokens.Count -ne 1 -or $tokens[0] -cne '__CONTROLLER_NAME_JSON__') {
-          return [pscustomobject]@{ Ready=$false; Reason='controller-filesystem-conflict'; Next='Restore the single canonical controller-name placeholder in the manifest template.'; Bytes=$null }
+        if ($tokens.Count -ne 2 -or @($tokens | Where-Object { $_ -ceq '__CONTROLLER_NAME_JSON__' }).Count -ne 1 -or
+            @($tokens | Where-Object { $_ -ceq '__TASK_SET_ID_JSON__' }).Count -ne 1) {
+          return [pscustomobject]@{ Ready=$false; Reason='controller-filesystem-conflict'; Next='Restore the canonical controller-name and task-set placeholders in the manifest template.'; Bytes=$null }
         }
         $encodedName = $ControllerName | ConvertTo-Json -Compress
-        $bytes[$relativePath] = $utf8.GetBytes($text.Replace('__CONTROLLER_NAME_JSON__', $encodedName))
+        $encodedTaskSetId = (Get-TaskSetId $Root) | ConvertTo-Json -Compress
+        $manifestTemplate = $text
+        $bytes[$relativePath] = $utf8.GetBytes($text.Replace('__CONTROLLER_NAME_JSON__', $encodedName).Replace('__TASK_SET_ID_JSON__', $encodedTaskSetId))
       }
       else {
         if ($tokens.Count -ne 0) {
@@ -106,7 +117,10 @@ function Read-CanonicalTemplates {
       foreach ($relativePath in $templatePaths) {
         $validationPath = Join-Path $validationRoot $relativePath
         [IO.Directory]::CreateDirectory((Split-Path -Parent $validationPath)) | Out-Null
-        [IO.File]::WriteAllBytes($validationPath, [byte[]]$bytes[$relativePath])
+        $validationBytes = if ($relativePath -ceq '.codex-controller.json') {
+          $utf8.GetBytes($manifestTemplate.Replace('__CONTROLLER_NAME_JSON__', $encodedName).Replace('__TASK_SET_ID_JSON__', ((Get-TaskSetId $validationRoot) | ConvertTo-Json -Compress)))
+        } else { [byte[]]$bytes[$relativePath] }
+        [IO.File]::WriteAllBytes($validationPath, [byte[]]$validationBytes)
       }
       $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $adapter -Action Read -ControllerRoot $validationRoot 2>$null
       $exitCode = $LASTEXITCODE
@@ -427,21 +441,42 @@ function Get-LegacyInventory {
     $path = Join-Path $Root $relativePath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or -not (Test-ReparseComponents $path)) { return $null }
   }
+  $matchesV1 = $true; $matchesV2 = $true; $matchesCurrent = $true
   foreach ($relativePath in @('.gitignore','AGENTS.md','tools\control-state.ps1')) {
     $hash = Get-Hash ([IO.File]::ReadAllBytes((Join-Path $Root $relativePath)))
-    $currentHash = Get-Hash (Get-ExpectedBytes $relativePath)
-    if ($hash -cne $legacyV1ManagedHashes[$relativePath] -and $hash -cne $legacyV2ManagedHashes[$relativePath] -and $hash -cne $currentHash) { return $null }
+    if ($hash -cne $legacyV1ManagedHashes[$relativePath]) { $matchesV1 = $false }
+    if ($hash -cne $legacyV2ManagedHashes[$relativePath]) { $matchesV2 = $false }
+    if ($hash -cne (Get-Hash (Get-ExpectedBytes $relativePath))) { $matchesCurrent = $false }
   }
+  if (-not $matchesV1 -and -not $matchesV2 -and -not $matchesCurrent) { return $null }
   $state = Invoke-StateRead -Root $Root -PreferGenerated $false
   if (-not $state.Ready -or $state.Manifest.schemaVersion -notin @(1,2) -or $state.Manifest.templateVersion -ne $state.Manifest.schemaVersion -or
       ($EnforceName -and [string]$state.Manifest.controllerName -cne $ControllerName)) { return $null }
+  if (($state.Manifest.schemaVersion -eq 1 -and -not $matchesV1 -and -not $matchesCurrent) -or
+      ($state.Manifest.schemaVersion -eq 2 -and -not $matchesV2 -and -not $matchesCurrent)) { return $null }
   return [pscustomobject]@{ Manifest=$state.Manifest; CurrentHash=$state.Hash }
 }
 
 function Test-ControllerQuiescent {
   param($Manifest)
+  if ($null -ne $Manifest.controllerTaskIntent) { return $false }
   if ($Manifest.schemaVersion -ne 2) { return $true }
-  return @($Manifest.dispatchQueues | Where-Object { $null -ne $_.active -or @($_.pending).Count -gt 0 }).Count -eq 0
+  foreach ($queue in @($Manifest.dispatchQueues)) {
+    if ($null -ne $queue.active -or @($queue.pending).Count -gt 0 -or
+        ($null -ne $queue.lastTerminal -and $null -ne $queue.lastTerminal.writeLease -and $null -eq $queue.lastTerminal.writeLease.releasedAt)) { return $false }
+  }
+  return $true
+}
+
+function Get-UpgradedManifestBytes {
+  param([string]$Root, [object]$Manifest)
+  $queues = if ($Manifest.schemaVersion -eq 2) { @($Manifest.dispatchQueues) } else { @() }
+  $upgraded = [pscustomobject][ordered]@{
+    schemaVersion=3; generator='onboard-code-projects'; templateVersion=3; controllerName=[string]$Manifest.controllerName
+    controllerBinding=$Manifest.controllerBinding; controllerTaskIntent=$Manifest.controllerTaskIntent
+    projectBindings=@($Manifest.projectBindings); dispatchQueues=@($queues); taskSetId=(Get-TaskSetId $Root); taskSetReset=$null
+  }
+  return $utf8.GetBytes(($upgraded | ConvertTo-Json -Depth 12 -Compress) + "`n")
 }
 
 function Write-NewFile {
@@ -459,6 +494,7 @@ function Get-ControllerMutexName {
 function Invoke-LegacyUpgrade {
   param([string]$Root, [object]$Legacy)
   $mutex = New-Object Threading.Mutex($false, (Get-ControllerMutexName $Root))
+  $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ('onboard-controller-upgrade-store-' + [guid]::NewGuid().ToString('N'))
   $acquired = $false
   $candidates = @()
   $backups = @()
@@ -466,20 +502,23 @@ function Invoke-LegacyUpgrade {
   $createdPaths = @()
   $createdDirectories = @()
   try {
+    [IO.Directory]::CreateDirectory((Join-Path $stagingRoot 'memory')) | Out-Null
+    foreach ($directory in @('state','state\active','state\archive','state\goals')) { [IO.Directory]::CreateDirectory((Join-Path $stagingRoot $directory)) | Out-Null }
+    Write-NewFile -Path (Join-Path $stagingRoot '.codex-controller.json') -Bytes (Get-UpgradedManifestBytes -Root $Root -Manifest $Legacy.Manifest)
+    Write-NewFile -Path (Join-Path $stagingRoot '.chain-store.json') -Bytes (Get-ExpectedBytes '.chain-store.json')
+    $stagingOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $templateRoot 'tools\chain-store.ps1') -Action Rebuild -ControllerRoot $stagingRoot 2>$null
+    if ($LASTEXITCODE -ne 0) { throw 'upgrade-chain-store-staging-failed' }
+    $storeBytes = [ordered]@{}
+    foreach ($relativePath in $generatedStorePaths) { $storeBytes[$relativePath] = [IO.File]::ReadAllBytes((Join-Path $stagingRoot $relativePath)) }
+
     try { $acquired = $mutex.WaitOne(5000) } catch [Threading.AbandonedMutexException] { $acquired = $true }
     if (-not $acquired) { throw 'upgrade-mutex-timeout' }
     $current = Get-LegacyInventory -Root $Root -EnforceName $true
     if ($null -eq $current -or $current.CurrentHash -cne $Legacy.CurrentHash) { throw 'upgrade-state-changed' }
 
-    $queues = @()
-    if ($current.Manifest.schemaVersion -eq 2) { $queues = @($current.Manifest.dispatchQueues) }
-    $manifest = [pscustomobject][ordered]@{
-      schemaVersion=2; generator='onboard-code-projects'; templateVersion=2; controllerName=[string]$current.Manifest.controllerName
-      controllerBinding=$current.Manifest.controllerBinding; controllerTaskIntent=$current.Manifest.controllerTaskIntent
-      projectBindings=@($current.Manifest.projectBindings); dispatchQueues=$queues
-    }
+    $manifestBytes = Get-UpgradedManifestBytes -Root $Root -Manifest $current.Manifest
     $replacementBytes = [ordered]@{
-      '.codex-controller.json' = $utf8.GetBytes(($manifest | ConvertTo-Json -Depth 12 -Compress) + "`n")
+      '.codex-controller.json' = $manifestBytes
       '.gitignore' = [byte[]](Get-ExpectedBytes '.gitignore')
       'AGENTS.md' = [byte[]](Get-ExpectedBytes 'AGENTS.md')
       'tools\control-state.ps1' = [byte[]](Get-ExpectedBytes 'tools\control-state.ps1')
@@ -509,18 +548,18 @@ function Invoke-LegacyUpgrade {
       Write-NewFile -Path $path -Bytes (Get-ExpectedBytes $relativePath)
       $createdPaths += $path
     }
-    $createdPaths += @($generatedStorePaths | ForEach-Object { Join-Path $Root $_ })
-    $createdPaths += Join-Path $Root 'state\.rebuild-required'
-    $chainAdapter = Join-Path $Root 'tools\chain-store.ps1'
-    $chainOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $chainAdapter -Action Rebuild -ControllerRoot $Root 2>$null
-    $chainExit = $LASTEXITCODE
-    if ($chainExit -ne 0) { throw 'upgrade-chain-store-failed' }
+    foreach ($relativePath in $generatedStorePaths) {
+      $path = Join-Path $Root $relativePath
+      Write-NewFile -Path $path -Bytes ([byte[]]$storeBytes[$relativePath])
+      $createdPaths += $path
+    }
     foreach ($relativePath in $byteManagedPaths) {
       if (-not (Test-BytesEqual ([IO.File]::ReadAllBytes((Join-Path $Root $relativePath))) (Get-ExpectedBytes $relativePath))) { throw "upgrade-managed-readback-failed:$relativePath" }
     }
     $state = Invoke-StateRead -Root $Root -PreferGenerated $true
     if (-not $state.Ready) { throw "upgrade-manifest-readback-failed:$($state.Reason)" }
-    if ($state.Manifest.schemaVersion -ne 2 -or @($state.Manifest.dispatchQueues).Count -ne $queues.Count) { throw 'upgrade-manifest-readback-failed:content' }
+    if ($state.Manifest.schemaVersion -ne 3 -or $state.Hash -cne (Get-Hash $manifestBytes) -or
+        -not (Test-BytesEqual ([IO.File]::ReadAllBytes((Join-Path $Root '.codex-controller.json'))) $manifestBytes)) { throw 'upgrade-manifest-readback-failed:content' }
     $store = Invoke-ChainStoreVerify -Root $Root
     if (-not $store.Ready) { throw 'upgrade-store-readback-failed' }
     foreach ($backup in $backups) { if (Test-Path -LiteralPath $backup -PathType Leaf) { [IO.File]::Delete($backup) } }
@@ -544,6 +583,13 @@ function Invoke-LegacyUpgrade {
     foreach ($path in @($candidates) + @($backups)) { if (Test-Path -LiteralPath $path -PathType Leaf) { try { [IO.File]::Delete($path) } catch {} } }
     if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }
     $mutex.Dispose()
+    $resolvedStagingRoot = [IO.Path]::GetFullPath($stagingRoot)
+    $resolvedTempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    if ($resolvedStagingRoot.StartsWith($resolvedTempRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and
+        [IO.Path]::GetFileName($resolvedStagingRoot).StartsWith('onboard-controller-upgrade-store-', [StringComparison]::Ordinal) -and
+        (Test-Path -LiteralPath $resolvedStagingRoot -PathType Container)) {
+      try { [IO.Directory]::Delete($resolvedStagingRoot, $true) } catch {}
+    }
   }
 }
 
@@ -565,7 +611,11 @@ try {
   }
   $normalizedRoot = $rootResult.Root
 
-  $templates = Read-CanonicalTemplates
+  if (Test-Path -LiteralPath (Join-Path $normalizedRoot 'state\.task-set-reset-seal.json')) {
+    Finish -Status 'conflict' -ReasonCode 'controller-task-set-reset-seal-recovery-required' -Root $normalizedRoot -Changed $false -PlannedCreates @() -CurrentHash $null -ResultHash $null -NextAction 'Recover the exact task-set reset seal through the installed controller-state adapter before initializer work.' -ExitCode 1
+  }
+
+  $templates = Read-CanonicalTemplates -Root $normalizedRoot
   if (-not $templates.Ready) {
     $templateStatus = if ($templates.Reason -ceq 'controller-io-failure') { 'blocked' } else { 'conflict' }
     Finish -Status $templateStatus -ReasonCode $templates.Reason -Root $normalizedRoot -Changed $false -PlannedCreates @() -CurrentHash $null -ResultHash $null -NextAction $templates.Next -ExitCode 1
@@ -594,16 +644,23 @@ try {
       Finish -Status 'authorization-required' -ReasonCode 'controller-upgrade-authorization-required' -Root $normalizedRoot -Changed $false -PlannedCreates $upgradePaths -CurrentHash $legacy.CurrentHash -ResultHash $null -NextAction 'Obtain explicit controller-template upgrade authorization, then rerun Plan with AllowUpgrade.' -ExitCode 1
     }
     if ($Action -ceq 'Plan') {
-      Finish -Status 'planned' -ReasonCode 'controller-upgrade-plan-ready' -Root $normalizedRoot -Changed $true -PlannedCreates $upgradePaths -CurrentHash $legacy.CurrentHash -ResultHash $null -NextAction 'Run Apply with AllowUpgrade and the same controller root, name, and business project roots.' -ExitCode 0
+      $upgradeHash = Get-Hash (Get-UpgradedManifestBytes -Root $normalizedRoot -Manifest $legacy.Manifest)
+      Finish -Status 'planned' -ReasonCode 'controller-upgrade-plan-ready' -Root $normalizedRoot -Changed $true -PlannedCreates $upgradePaths -CurrentHash $legacy.CurrentHash -ResultHash $upgradeHash -NextAction 'Have the Skill preflight prove external receipts, claims, goals, and writers are quiescent, then run Apply with AllowUpgrade and the same inputs.' -ExitCode 0
     }
     $upgraded = Invoke-LegacyUpgrade -Root $normalizedRoot -Legacy $legacy
-    Finish -Status 'applied' -ReasonCode 'controller-upgraded' -Root $normalizedRoot -Changed $true -PlannedCreates $upgradePaths -CurrentHash $legacy.CurrentHash -ResultHash $upgraded.CurrentHash -NextAction 'Continue with the preserved bindings and the empty v2 per-project dispatch queues.' -ExitCode 0
+    Finish -Status 'applied' -ReasonCode 'controller-upgraded' -Root $normalizedRoot -Changed $true -PlannedCreates $upgradePaths -CurrentHash $legacy.CurrentHash -ResultHash $upgraded.CurrentHash -NextAction 'The v3 files are local-only; the Skill preflight must still prove external receipts, claims, goals, and writers are quiescent before reset work.' -ExitCode 0
   }
 
   $inventory = Get-Inventory -Root $normalizedRoot -RequireComplete ($Action -ceq 'Verify') -EnforceName ($Action -in @('Plan', 'Apply'))
   $reportedCurrentHash = $inventory.CurrentHash
   if (-not $inventory.Ready) {
     Finish -Status 'conflict' -ReasonCode $inventory.Reason -Root $normalizedRoot -Changed $false -PlannedCreates @($inventory.Missing) -CurrentHash $inventory.CurrentHash -ResultHash $null -NextAction $inventory.Next -ExitCode 1
+  }
+  if ($Action -in @('Plan','Apply') -and $null -ne $inventory.Manifest -and $inventory.Manifest.schemaVersion -in @(1,2)) {
+    Finish -Status 'conflict' -ReasonCode 'controller-upgrade-unsupported-layout' -Root $normalizedRoot -Changed $false -PlannedCreates @() -CurrentHash $inventory.CurrentHash -ResultHash $null -NextAction 'Preserve this store-backed legacy controller for manual review; only an exact known pre-store v1 or v2 layout can be upgraded automatically.' -ExitCode 1
+  }
+  if ($Action -in @('Plan','Apply') -and $null -ne $inventory.Manifest -and $inventory.Manifest.schemaVersion -eq 3 -and $null -ne $inventory.Manifest.taskSetReset) {
+    Finish -Status 'conflict' -ReasonCode 'controller-upgrade-active-work' -Root $normalizedRoot -Changed $false -PlannedCreates @() -CurrentHash $inventory.CurrentHash -ResultHash $null -NextAction 'Finish or recover the active task-set reset before initializer writes.' -ExitCode 1
   }
 
   if ($Action -in @('Plan', 'Apply')) {
@@ -622,7 +679,8 @@ try {
 
   $planned = @($inventory.Missing)
   if ($Action -ceq 'Plan') {
-    Finish -Status 'planned' -ReasonCode 'controller-plan-ready' -Root $normalizedRoot -Changed ($planned.Count -gt 0) -PlannedCreates $planned -CurrentHash $inventory.CurrentHash -ResultHash $inventory.CurrentHash -NextAction 'Run Apply with the same controller root, name, and business project roots.' -ExitCode 0
+    $plannedHash = if ($planned -ccontains '.codex-controller.json') { Get-Hash (Get-ExpectedBytes '.codex-controller.json') } else { $inventory.CurrentHash }
+    Finish -Status 'planned' -ReasonCode 'controller-plan-ready' -Root $normalizedRoot -Changed ($planned.Count -gt 0) -PlannedCreates $planned -CurrentHash $inventory.CurrentHash -ResultHash $plannedHash -NextAction 'Run Apply with the same controller root, name, and business project roots.' -ExitCode 0
   }
   if ($Action -ceq 'Verify') {
     $state = Invoke-StateRead -Root $normalizedRoot -PreferGenerated $true
@@ -665,7 +723,7 @@ try {
   if (-not $verified.Ready) { throw 'Post-write verification failed' }
   $state = Invoke-StateRead -Root $normalizedRoot -PreferGenerated $true
   if (-not $state.Ready -or [string]$state.Manifest.controllerName -cne $ControllerName) { throw 'Generated state adapter verification failed' }
-  Finish -Status 'applied' -ReasonCode 'controller-initialized' -Root $normalizedRoot -Changed $changed -PlannedCreates $planned -CurrentHash $inventory.CurrentHash -ResultHash $state.Hash -NextAction 'Save this directory as a Codex project, then request controller task creation.' -ExitCode 0
+  Finish -Status 'applied' -ReasonCode 'controller-initialized' -Root $normalizedRoot -Changed $changed -PlannedCreates $planned -CurrentHash $inventory.CurrentHash -ResultHash $state.Hash -NextAction 'Save this directory as a Codex project; the Skill preflight owns external runtime checks before controller task creation.' -ExitCode 0
 }
 catch {
   Finish -Status 'blocked' -ReasonCode 'controller-io-failure' -Root $normalizedRoot -Changed $didWrite -PlannedCreates @() -CurrentHash $reportedCurrentHash -ResultHash $null -NextAction 'Inspect the controller root for a concurrent change or I/O failure, then rerun Plan.' -Warnings @('An I/O operation failed within the controller boundary.') -ExitCode 1

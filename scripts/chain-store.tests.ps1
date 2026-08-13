@@ -111,6 +111,36 @@ function Get-TestHash {
   finally{$sha.Dispose()}
 }
 
+function Get-StoreFingerprint {
+  param([string]$Root)
+  $paths = @(
+    Join-Path $Root '.chain-store.json'
+    Join-Path $Root 'state'
+    Join-Path $Root 'memory\MEMORY.md'
+    Join-Path $Root 'TASKS.md'
+  )
+  $parts = New-Object 'Collections.Generic.List[string]'
+  foreach ($path in $paths) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      $relative = $path.Substring($Root.Length).TrimStart('\').Replace('\','/')
+      $parts.Add($relative + [char]0 + (Get-TestHash ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))))
+    }
+    elseif (Test-Path -LiteralPath $path -PathType Container) {
+      foreach ($file in @(Get-ChildItem -LiteralPath $path -File -Recurse | Sort-Object FullName)) {
+        $relative = $file.FullName.Substring($Root.Length).TrimStart('\').Replace('\','/')
+        $parts.Add($relative + [char]0 + (Get-TestHash ([Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName)))))
+      }
+    }
+  }
+  return Get-TestHash ([string]::Join([char]0, $parts))
+}
+
+function Write-ResetManifest {
+  param([string]$Root, [AllowNull()][string]$Phase)
+  $reset = if ([string]::IsNullOrEmpty($Phase)) { $null } else { [pscustomobject][ordered]@{ phase=$Phase } }
+  Write-Json (Join-Path $Root '.codex-controller.json') ([pscustomobject][ordered]@{ schemaVersion=3; taskSetReset=$reset })
+}
+
 function New-Record {
   param([string]$Id, [string]$State = 'active', [string]$Status = 'running', [string]$Objective = 'Verify the controller memory store')
   $updated = if ($State -ceq 'terminal') { '2099-01-01T11:00:00+08:00' } else { '2099-01-01T10:00:00+08:00' }
@@ -554,6 +584,81 @@ try {
   Assert-Result (Invoke-Store -Action Rebuild -Root $root) 0 applied 'store-rebuilt'
   Pass 'experience content must exactly derive from canonical goal logs, not only share their watermark'
 
+  $resetCandidate = Join-Path $root 'reset-candidate.json'
+  Write-Json $resetCandidate (New-Record 'CHAIN-20990101-reset-frozen')
+  $resetGoalId = 'GOAL-20990101-reset-frozen'
+  $resetGoalCandidate = Join-Path $root 'reset-goal-candidate.json'
+  Write-Json $resetGoalCandidate (New-GoalRecord $resetGoalId @('C:\projects\reset-frozen'))
+  Write-Json $importPath $historicalImport
+  Write-ResetManifest $root prepared
+  $frozenFingerprint = Get-StoreFingerprint $root
+  foreach ($call in @(
+    (Invoke-Store -Action Put -Root $root -CandidatePath $resetCandidate -ExpectedEntryHash MISSING),
+    (Invoke-Store -Action GoalPut -Root $root -CandidatePath $resetGoalCandidate -ExpectedEntryHash MISSING -GoalLineageId $resetGoalId),
+    (Invoke-Store -Action ExperienceImport -Root $root -CandidatePath $importPath -ExpectedEntryHash MISSING),
+    (Invoke-Store -Action Rebuild -Root $root)
+  )) {
+    Assert-Result $call 1 conflict 'store-task-set-reset-in-progress'
+    Assert-True ((Get-StoreFingerprint $root) -ceq $frozenFingerprint) 'A reset-fenced writer must not change canonical or derived store bytes'
+  }
+  Pass 'active task-set reset freezes all initialized canonical writers without changing store bytes'
+
+  $initializeFrozenRoot = Join-Path $testRoot 'initialize-reset-frozen'
+  [IO.Directory]::CreateDirectory($initializeFrozenRoot) | Out-Null
+  Write-ResetManifest $initializeFrozenRoot prepared
+  $initializeFrozen = Invoke-Store Initialize $initializeFrozenRoot
+  Assert-Result $initializeFrozen 1 conflict 'store-task-set-reset-in-progress'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $initializeFrozenRoot '.chain-store.json'))) 'Reset-fenced Initialize must not create store state'
+  Pass 'active task-set reset freezes Initialize before its first write'
+
+  Write-ResetManifest $root completed
+  Assert-Result (Invoke-Store -Action Rebuild -Root $root) 0 applied 'store-rebuilt'
+  Write-ResetManifest $root $null
+
+  $sealPath = Join-Path $root 'state\.task-set-reset-seal.json'
+  Write-Json $sealPath ([pscustomobject][ordered]@{ schemaVersion=1; operationId='reset-seal-test' })
+  $sealedFingerprint = Get-StoreFingerprint $root
+  Assert-Result (Invoke-Store -Action Read -Root $root) 0 verified 'store-read'
+  Assert-Result (Invoke-Store -Action Get -Root $root -ChainId $sourceChainId) 0 verified 'task-read'
+  foreach ($call in @(
+    (Invoke-Store -Action Put -Root $root -CandidatePath $resetCandidate -ExpectedEntryHash MISSING),
+    (Invoke-Store -Action GoalPut -Root $root -CandidatePath $resetGoalCandidate -ExpectedEntryHash MISSING -GoalLineageId $resetGoalId),
+    (Invoke-Store -Action ExperienceImport -Root $root -CandidatePath $importPath -ExpectedEntryHash MISSING),
+    (Invoke-Store -Action Rebuild -Root $root)
+  )) {
+    Assert-Result $call 1 conflict 'store-task-set-reset-seal-recovery-required'
+    Assert-True ((Get-StoreFingerprint $root) -ceq $sealedFingerprint) 'A seal-fenced writer must not change canonical or derived store bytes'
+  }
+  [IO.File]::Delete($sealPath)
+  Pass 'reset seal freezes initialized canonical writers while reads remain available'
+
+  $initializeSealedRoot = Join-Path $testRoot 'initialize-reset-sealed'
+  [IO.Directory]::CreateDirectory((Join-Path $initializeSealedRoot 'state')) | Out-Null
+  Write-ResetManifest $initializeSealedRoot $null
+  Write-Json (Join-Path $initializeSealedRoot 'state\.task-set-reset-seal.json') ([pscustomobject][ordered]@{ schemaVersion=1; operationId='initialize-seal-test' })
+  $initializeSealed = Invoke-Store Initialize $initializeSealedRoot
+  Assert-Result $initializeSealed 1 conflict 'store-task-set-reset-seal-recovery-required'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $initializeSealedRoot '.chain-store.json'))) 'Seal-fenced Initialize must not create store state'
+  Pass 'reset seal freezes Initialize before its first write'
+
+  $resetCreated = Invoke-Store -Action Put -Root $root -CandidatePath $resetCandidate -ExpectedEntryHash MISSING
+  Assert-Result $resetCreated 0 applied 'task-created'
+  Pass 'completed and cleared reset slots restore canonical writes'
+
+  $controlMutexName = 'Local\onboard-code-projects-' + (Get-TestHash $root.ToUpperInvariant())
+  $controlMutex = New-Object Threading.Mutex($false, $controlMutexName)
+  try {
+    Assert-True $controlMutex.WaitOne(0) 'Test must acquire the control-state root mutex'
+    $blockedByControlMutex = Invoke-Store -Action Rebuild -Root $root
+    Assert-Result $blockedByControlMutex 3 blocked 'store-lock-timeout'
+  }
+  finally {
+    try { $controlMutex.ReleaseMutex() } catch {}
+    $controlMutex.Dispose()
+  }
+  Assert-Result (Invoke-Store -Action Rebuild -Root $root) 0 applied 'store-rebuilt'
+  Pass 'chain writers share the exact control-state root mutex identity'
+
   $index = [IO.File]::ReadAllText($indexPath, $utf8) | ConvertFrom-Json
   $index.sourceWatermark = ('0' * 64)
   Write-Json $indexPath $index
@@ -715,6 +820,22 @@ try {
   $legacyClosedOnly=Invoke-Store Get $prepared.Result.data.migrationPath $legacyClosedOnlyPayload.id
   Assert-True ($legacyClosedOnly.Result.data.record.state -ceq 'terminal') 'Migration must not keep a closed legacy summary active'
   Pass 'legacy migration builds a verified shadow store'
+
+  Write-ResetManifest $migrationRoot prepared
+  $resetFrozenMigration = Invoke-Store ApplyMigration $migrationRoot '' '' '' $false $ledger (Split-Path -Parent $archive) $prepared.Result.data.migrationPath $prepared.Result.sourceHash $true
+  Assert-Result $resetFrozenMigration 1 conflict 'store-task-set-reset-in-progress'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $migrationRoot 'state')) -and (Test-Path -LiteralPath $prepared.Result.data.migrationPath -PathType Container)) 'Reset-fenced ApplyMigration must preserve source and shadow state'
+  Write-ResetManifest $migrationRoot $null
+  Pass 'active task-set reset freezes migration cutover before canonical writes'
+
+  [IO.Directory]::CreateDirectory((Join-Path $migrationRoot 'state')) | Out-Null
+  $migrationSealPath = Join-Path $migrationRoot 'state\.task-set-reset-seal.json'
+  Write-Json $migrationSealPath ([pscustomobject][ordered]@{ schemaVersion=1; operationId='migration-seal-test' })
+  $sealFrozenMigration = Invoke-Store ApplyMigration $migrationRoot '' '' '' $false $ledger (Split-Path -Parent $archive) $prepared.Result.data.migrationPath $prepared.Result.sourceHash $true
+  Assert-Result $sealFrozenMigration 1 conflict 'store-task-set-reset-seal-recovery-required'
+  Assert-True ((Test-Path -LiteralPath $prepared.Result.data.migrationPath -PathType Container) -and -not (Test-Path -LiteralPath (Join-Path $migrationRoot '.chain-store.json'))) 'Seal-fenced ApplyMigration must preserve source and shadow state'
+  [IO.Directory]::Delete((Join-Path $migrationRoot 'state'), $true)
+  Pass 'reset seal freezes migration cutover before canonical writes'
 
   [IO.File]::AppendAllText($ledger,"`n",$utf8)
   $sourceConflict=Invoke-Store ApplyMigration $migrationRoot '' '' '' $false $ledger (Split-Path -Parent $archive) $prepared.Result.data.migrationPath $prepared.Result.sourceHash $true

@@ -8,7 +8,14 @@
 
 Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-Keep each repository in its own verified Codex project task instead of mixing several codebases, instructions, branches, and permissions in one long conversation. An optional controller coordinates work that crosses repositories.
+onboard-code-projects is a Windows-first Codex Desktop multi-repository workflow-isolation Skill.
+
+- **Use when:** work crosses two or more related repositories.
+- **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination.
+- **It does not:** create saved Codex projects or approve permissions.
+- **It is not:** a security sandbox, and it does not deploy software.
+
+This reduces the risk of repository instructions, branches, permissions, evidence, and edits being mixed in one long conversation.
 
 > **Preview:** Windows and Codex Desktop are the supported release surface. Other platforms are not yet release-tested end to end.
 
@@ -24,17 +31,25 @@ Keep each repository in its own verified Codex project task instead of mixing se
 
 Use it when a feature, incident, or release crosses two or more repositories with different instructions, branch rules, tests, or write boundaries. For ordinary single-repository work, use that repository's project task directly.
 
-### How this differs from subagents
+### Choose the right boundary
 
-Subagents divide short-lived work inside one active task. This Skill creates durable, project-bound entry tasks that can be reused across later work. A project task may still use subagents internally; the two approaches are complementary.
+| Option | Context and lifetime | Best use |
+| --- | --- | --- |
+| Single long conversation | Several repositories share one growing context. | A quick, low-risk check where repository rules do not differ. |
+| Subagent | Short-lived parallel work inside the current task. | Independent subtasks that do not need a reusable project identity. |
+| This Skill | One exact-root, reusable entry task per repository; the optional controller keeps only cross-project facts. | Features, incidents, and releases that cross repository boundaries. |
 
-## What it creates
+Project entry tasks may still use subagents internally; the two approaches are complementary.
+
+## What you get
 
 ```mermaid
 flowchart LR
-    U["User"] --> C["Optional controller<br/>cross-project work"]
-    C --> A["Project A entry task"]
-    C --> B["Project B entry task"]
+    U["User"] --> A["Project A entry task"]
+    U --> B["Project B entry task"]
+    U -.->|optional cross-project work| C["Controller"]
+    C --> A
+    C --> B
     A --> RA["Repository A + index"]
     B --> RB["Repository B + index"]
 ```
@@ -96,13 +111,30 @@ dispatchReturnMode: foreground
 Initialize the controller and register the project entry tasks.
 ```
 
-The Skill-only path uses `foreground` because `$skill-installer` does not activate the plugin Stop Hook. Install the plugin through a trusted source before selecting `receipts` or `receipts-and-wake`.
+Without the plugin Stop Hook, use `native-callback` when available; otherwise use `foreground`. Install the plugin through a trusted source before selecting `receipts` or `receipts-and-wake`.
 
 After setup, send cross-project work to the controller in ordinary language:
 
 ```text
 Trace the invitation login flow across the H5 client, commerce backend, and member service. Start read-only, freeze the shared interface contract, dispatch repository-specific checks to the existing project tasks, and report end-to-end evidence.
 ```
+
+### Refresh long-lived controller tasks
+
+When a controller and its project entry tasks need fresh conversations, exact generated v3 support can replace the current bound set while carrying forward verified history. Start this from a separate coordinator task outside the set being replaced; it is archived last. The reset blocks safely when work is not quiet, complete history cannot be read, or the controller is custom, legacy, store-backed v2, or otherwise not an exact generated v3 installation.
+
+```text
+resetControllerTasks: true
+Action: Plan
+
+# Review the returned planHash, then send the same request with:
+Action: Apply
+planHash: <returned planHash>
+```
+
+Plan does not write and authorizes only the stable replacement scope; changing task history while reviewing the Plan does not require another approval. Apply accepts only the exact returned hash, creates bootstrap-only standby replacements with a unique creation marker and no business handoff, rechecks and freezes the complete old history, sends the final bounded sanitized handoff, and only then activates the new set. It deletes no task and resumes the same operation after interruption. See the [controller runtime reference](./references/controller-runtime.md) for advanced behavior and recovery.
+
+Reset also requires usable Codex task APIs and an exact single-root saved project for every replacement; ambiguous roots or an unprovable task cwd block safely.
 
 ## Git URL onboarding
 
@@ -147,6 +179,7 @@ Detailed queue, recovery, convergence, receipt, and controller-state contracts l
 | `controllerName` | No | Defaults to `Multi-Project Control Center`. |
 | `initializeController` | No | Authorizes controller scaffold initialization. |
 | `createControllerTask` | No | Authorizes controller task creation. |
+| `resetControllerTasks` | No | Explicitly requests a safe Plan before replacing the current controller task set. |
 | `dispatchReturnMode` | No | `foreground`, `native-callback`, `receipts`, or `receipts-and-wake`. |
 
 Advanced upgrade and reconciliation inputs are documented in [the controller runtime reference](./references/controller-runtime.md).
@@ -161,7 +194,7 @@ Advanced upgrade and reconciliation inputs are documented in [the controller run
 | Git | Git URLs and Git metadata. |
 | OpenSSH | SSH Git URLs only. |
 | Git LFS | Only when `fullLfsCheckout: true`. |
-| Node.js 18+ | Durable Stop receipts and automatic wake only. |
+| Node.js 18+ | Controller task-set reset, durable Stop receipts, and automatic wake. |
 
 These read-only preflight commands do not create projects, tasks, indexes, controller files, or Git state:
 
@@ -173,11 +206,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 
 # SSH Git URL
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireGit -RequireSsh
 # Add -RequireLfs to the applicable Git command only for a full LFS checkout.
-# Durable event return
+# Controller task-set reset or durable event return
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -RequireNode
 ```
 
-Skill-only installation provides project isolation, indexing, an optional controller, and foreground monitoring. Durable receipts require the plugin Stop Hook and Node.js; automatic wake also requires the capabilities validated by the Skill.
+Skill-only installation provides project isolation, indexing, an optional controller, and foreground monitoring. Controller task-set reset requires Node.js 18+. Durable receipts require the plugin Stop Hook and Node.js; automatic wake also requires the capabilities validated by the Skill.
 
 ## Permissions and local data
 

@@ -108,7 +108,7 @@ function Invoke-ReleasePackageGate {
     'references/controller-runtime.md', 'skills/onboard-code-projects/SKILL.md',
     'scripts/preflight.ps1', 'scripts/preflight.tests.ps1', 'scripts/init-controller.ps1', 'scripts/init-controller.tests.ps1',
     'scripts/source-input.ps1', 'scripts/source-input.tests.ps1', 'scripts/index-mode.ps1', 'scripts/index-mode.tests.ps1',
-    'scripts/chain-store.tests.ps1', 'scripts/control-state.tests.ps1', 'scripts/skill-contract.tests.ps1', 'scripts/skill-size.tests.ps1',
+    'scripts/chain-store.tests.ps1', 'scripts/control-state.tests.ps1', 'scripts/task-set-reset.tests.ps1', 'scripts/skill-contract.tests.ps1', 'scripts/skill-size.tests.ps1',
     'scripts/dispatch-return-runtime.mjs', 'scripts/dispatch-return-runtime.tests.mjs',
     'templates/controller/.codex-controller.json', 'templates/controller/.chain-store.json',
     'templates/controller/.gitignore', 'templates/controller/AGENTS.md', 'templates/controller/docs/cross-project-contracts.md',

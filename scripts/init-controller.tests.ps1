@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$FocusedTaskSet, [switch]$FocusedTaskSetSeal, [switch]$FocusedStoreBackedV2)
 
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
@@ -18,6 +18,32 @@ function Get-TestHash {
   $sha = [Security.Cryptography.SHA256]::Create()
   try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
   finally { $sha.Dispose() }
+}
+
+function Get-ExpectedTaskSetId {
+  param([string]$NormalizedRoot)
+  $identityRoot = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $NormalizedRoot.ToLowerInvariant() } else { $NormalizedRoot }
+  return 'task-set-' + (Get-TestHash ([Text.Encoding]::UTF8.GetBytes($identityRoot)))
+}
+
+function Get-ExpectedV3Manifest {
+  param(
+    [string]$Root,
+    [string]$Name,
+    [AllowNull()][object]$ControllerBinding = $null,
+    [AllowNull()][object]$ControllerTaskIntent = $null,
+    [object[]]$ProjectBindings = @(),
+    [object[]]$DispatchQueues = @(),
+    [AllowNull()][object]$TaskSetReset = $null
+  )
+  $normalizedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+  $manifest = [pscustomobject][ordered]@{
+    schemaVersion=3; generator='onboard-code-projects'; templateVersion=3; controllerName=$Name
+    controllerBinding=$ControllerBinding; controllerTaskIntent=$ControllerTaskIntent; projectBindings=@($ProjectBindings); dispatchQueues=@($DispatchQueues)
+    taskSetId=(Get-ExpectedTaskSetId $normalizedRoot); taskSetReset=$TaskSetReset
+  }
+  $bytes = [Text.Encoding]::UTF8.GetBytes(($manifest | ConvertTo-Json -Depth 12 -Compress) + "`n")
+  return [pscustomobject]@{ Manifest=$manifest; Bytes=$bytes; Hash=(Get-TestHash $bytes) }
 }
 
 function Assert-Result {
@@ -69,7 +95,8 @@ function Write-TestManifest {
     [AllowNull()][object]$ControllerTaskIntent = $null,
     [object[]]$ProjectBindings = @(),
     [object[]]$DispatchQueues = @(),
-    [int]$Version = 2
+    [int]$Version = 3,
+    [AllowNull()][object]$TaskSetReset = $null
   )
   $manifest = [ordered]@{
     schemaVersion = $Version
@@ -80,11 +107,112 @@ function Write-TestManifest {
     controllerTaskIntent = $ControllerTaskIntent
     projectBindings = @($ProjectBindings)
   }
-  if ($Version -eq 2) { $manifest.dispatchQueues = @($DispatchQueues) }
+  if ($Version -ge 2) { $manifest.dispatchQueues = @($DispatchQueues) }
+  if ($Version -eq 3) {
+    $manifest.taskSetId = Get-ExpectedTaskSetId ([IO.Path]::GetFullPath($Root).TrimEnd('\'))
+    $manifest.taskSetReset = $TaskSetReset
+  }
   $manifest = [pscustomobject]$manifest
   $bytes = [Text.Encoding]::UTF8.GetBytes(($manifest | ConvertTo-Json -Depth 12 -Compress) + "`n")
   [IO.File]::WriteAllBytes((Join-Path $Root '.codex-controller.json'), $bytes)
   return $bytes
+}
+
+function Get-TestCanonicalHash {
+  param([object]$Value)
+  return Get-TestHash ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Value -Depth 20 -Compress)))
+}
+
+function New-TestPreparedTaskSetReset {
+  param(
+    [string]$Root,
+    [object]$ControllerBinding,
+    [string]$OperationId,
+    [string]$CreationOperationId
+  )
+  $normalizedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+  $fromTaskSetId = Get-ExpectedTaskSetId $normalizedRoot
+  $toTaskSetId = 'task-set-' + (Get-TestCanonicalHash @('task-set-reset-v1', $normalizedRoot.ToLowerInvariant(), $fromTaskSetId, $OperationId))
+  $summary = 'bounded reset fixture handoff'
+  $handoff = [pscustomobject][ordered]@{
+    summary=$summary; summaryHash=(Get-TestHash ([Text.Encoding]::UTF8.GetBytes($summary)))
+    oldestTurnId='fixture-turn-1'; newestTurnId='fixture-turn-1'; turnCount=1; historyDigest=('a' * 64); eofComplete=$true; observedAt='2026-08-03T00:00:10Z'
+  }
+  $coordinator = [pscustomobject][ordered]@{ threadId='fixture-reset-coordinator'; hostId='fixture-reset-coordinator-host' }
+  $planTarget = [pscustomobject][ordered]@{
+    kind='controller'; projectRoot=$normalizedRoot; creationOperationId=$CreationOperationId
+    expectedCodexProjectId=$ControllerBinding.codexProjectId; expectedHostId=$ControllerBinding.hostId
+  }
+  $plan = [pscustomobject][ordered]@{
+    operationId=$OperationId; fromTaskSetId=$fromTaskSetId; toTaskSetId=$toTaskSetId; coordinator=$coordinator
+    expectedController=$ControllerBinding; expectedProjectBindings=@(); targets=@($planTarget)
+  }
+  $planHash = Get-TestCanonicalHash $plan
+  $runtimeReadback = [pscustomobject][ordered]@{
+    state='controller-replacement-read'; controllerRoot=$normalizedRoot; controllerThreadId=$ControllerBinding.threadId; hostId=$ControllerBinding.hostId
+    replacementState='none'; operationId=$null; replacementSetHash=$null; oldControllerThreadId=$null; oldHostId=$null; newControllerThreadId=$null; newHostId=$null
+    manifestPreparedHash=$null; prepareToken=$null; manifestSwitchedHash=$null; preparedAt=$null; committedAt=$null; activeDispatchCount=0; unacknowledgedReceiptCount=0
+    fenceState='prepared'; fenceOperationId=$OperationId; fencePlanHash=$planHash; fenceManifestExpectedHash=('f' * 64); fencePreparedAt='2026-08-03T00:00:15Z'; fenceCompletedManifestHash=$null; fenceCompletedAt=$null
+    wakeWorkerState='none'; wakeWorkerOperationId=$null; wakeWorkerThreadId=$null; wakeWorkerClientThreadId=$null
+    wakeAutomationState='none'; wakeAutomationOperationId=$null; wakeAutomationId=$null
+  }
+  $quietCore = [pscustomobject][ordered]@{
+    runtimeDispatches=0; unackedReceipts=0; claims=0; goalReservations=0; approvals=0; activeScopedTasks=0
+    automationIntents=0; writers=0; candidates=0; heartbeatPaused=$true
+    runtimeReadback=$runtimeReadback; runtimeReadbackHash=(Get-TestCanonicalHash $runtimeReadback); observedAt='2026-08-03T00:00:20Z'
+  }
+  $quiet = [pscustomobject][ordered]@{
+    runtimeDispatches=0; unackedReceipts=0; claims=0; goalReservations=0; approvals=0; activeScopedTasks=0
+    automationIntents=0; writers=0; candidates=0; heartbeatPaused=$true
+    runtimeReadback=$runtimeReadback; runtimeReadbackHash=$quietCore.runtimeReadbackHash; observedAt=$quietCore.observedAt; proofHash=(Get-TestCanonicalHash $quietCore)
+  }
+  $storedTarget = [pscustomobject][ordered]@{
+    kind='controller'; projectRoot=$normalizedRoot; creationOperationId=$CreationOperationId
+    expectedCodexProjectId=$ControllerBinding.codexProjectId; expectedHostId=$ControllerBinding.hostId
+    initialHandoff=$handoff; finalHandoff=$null; creationIssuedAt=$null; clientThreadId=$null; replacement=$null; bootstrapProof=$null; standbyProof=$null
+  }
+  $evidence = [pscustomobject][ordered]@{
+    targets=@([pscustomobject][ordered]@{kind='controller';projectRoot=$normalizedRoot;handoff=$handoff})
+    activeChains=@(); externalQuiescence=$quiet; archives=@()
+  }
+  return [pscustomobject][ordered]@{
+    operationId=$OperationId; planHash=$planHash; initialEvidenceHash=(Get-TestCanonicalHash $evidence); finalEvidenceHash=$null
+    fromTaskSetId=$fromTaskSetId; toTaskSetId=$toTaskSetId; phase='prepared'; coordinator=$coordinator
+    expectedController=$ControllerBinding; expectedProjectBindings=@(); targets=@($storedTarget)
+    initialActiveChains=@(); initialExternalQuiescence=$quiet; finalActiveChains=$null; finalExternalQuiescence=$null
+    replacementSetHash=$null; runtimePrepared=$null; runtimeCommitted=$null; archives=@()
+    preparedAt='2026-08-03T00:00:30Z'; finalizedAt=$null; switchedAt=$null; completedAt=$null
+  }
+}
+
+function Invoke-FreshTaskSetLifecycle {
+  param([string]$Root, [string]$Name = 'Controller Test')
+  $expected = Get-ExpectedV3Manifest -Root $Root -Name $Name
+  $firstPlan = Invoke-Subject -Action Plan -ControllerRoot $Root -ControllerName $Name
+  Assert-Result $firstPlan.Result 'Plan' @('planned') $firstPlan.ExitCode
+  Assert-True ($firstPlan.ExitCode -eq 0 -and $firstPlan.Result.changed) 'Fresh Plan must report the deterministic v3 scaffold'
+  Assert-True ($firstPlan.Result.resultManifestHash -ceq $expected.Hash) 'Fresh Plan must publish the exact deterministic v3 manifest hash'
+  Assert-True (-not (Test-Path -LiteralPath $Root)) 'Fresh Plan must remain write-free'
+  $secondPlan = Invoke-Subject -Action Plan -ControllerRoot ($Root + '\') -ControllerName $Name
+  Assert-Result $secondPlan.Result 'Plan' @('planned') $secondPlan.ExitCode
+  Assert-True ($secondPlan.Result.resultManifestHash -ceq $firstPlan.Result.resultManifestHash) 'Equivalent normalized roots must produce the same Plan manifest hash'
+  Assert-True (-not (Test-Path -LiteralPath $Root)) 'Repeated Plan must remain write-free'
+  if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $casePlan = Invoke-Subject -Action Plan -ControllerRoot $Root.ToUpperInvariant() -ControllerName $Name
+    Assert-Result $casePlan.Result 'Plan' @('planned') $casePlan.ExitCode
+    Assert-True ($casePlan.Result.resultManifestHash -ceq $firstPlan.Result.resultManifestHash) 'Equivalent Windows path casing must produce the same Plan manifest hash'
+    Assert-True (-not (Test-Path -LiteralPath $Root)) 'Case-variant Plan must remain write-free'
+  }
+  $apply = Invoke-Subject -Action Apply -ControllerRoot $Root -ControllerName $Name
+  Assert-Result $apply.Result 'Apply' @('applied') $apply.ExitCode
+  Assert-True ($apply.ExitCode -eq 0 -and $apply.Result.resultManifestHash -ceq $firstPlan.Result.resultManifestHash) 'Apply must materialize the exact manifest hash reported by Plan'
+  $actualBytes = [IO.File]::ReadAllBytes((Join-Path $Root '.codex-controller.json'))
+  Assert-True ([Linq.Enumerable]::SequenceEqual($actualBytes, [byte[]]$expected.Bytes)) 'Apply must materialize the exact closed v3 manifest bytes'
+  Assert-True (-not ([Text.Encoding]::UTF8.GetString($actualBytes).Contains('__'))) 'Apply must not leave a template placeholder in the manifest'
+  $verify = Invoke-Subject -Action Verify -ControllerRoot $Root -ControllerName $null
+  Assert-Result $verify.Result 'Verify' @('verified') $verify.ExitCode
+  Assert-True ($verify.ExitCode -eq 0 -and $verify.Result.resultManifestHash -ceq $firstPlan.Result.resultManifestHash) 'Verify must accept the deterministic v3 manifest'
+  return [pscustomobject]@{ Plan=$firstPlan; Apply=$apply; Verify=$verify; Expected=$expected }
 }
 
 function Convert-ToLegacyLayout {
@@ -112,6 +240,81 @@ foreach ($template in $templatePaths) {
   if (-not (Test-Path -LiteralPath (Join-Path $templateRoot $template) -PathType Leaf)) {
     throw "RED: missing controller template $template"
   }
+}
+
+if ($FocusedTaskSet) {
+  $focusedRoot = Join-Path ([IO.Path]::GetTempPath()) ('onboard-controller-task-set-focus-' + [guid]::NewGuid().ToString('N'))
+  try {
+    Invoke-FreshTaskSetLifecycle -Root $focusedRoot | Out-Null
+    $focusedBinding = [pscustomobject][ordered]@{ threadId='focused-controller'; codexProjectId='focused-project'; hostId='focused-host'; projectRoot=$focusedRoot }
+    $focusedReset = New-TestPreparedTaskSetReset -Root $focusedRoot -ControllerBinding $focusedBinding -OperationId 'focused-reset' -CreationOperationId 'focused-create'
+    Write-TestManifest -Root $focusedRoot -ControllerBinding $focusedBinding -TaskSetReset $focusedReset | Out-Null
+    $focusedStateOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $focusedRoot 'tools\control-state.ps1') -Action Read -ControllerRoot $focusedRoot
+    $focusedStateExit = $LASTEXITCODE
+    $focusedState = (($focusedStateOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) | ConvertFrom-Json
+    Assert-True ($focusedStateExit -eq 0 -and $focusedState.status -ceq 'verified') "Focused reset fixture must pass v3 validation; got $($focusedState.reasonCode)"
+    $focusedResetPlan = Invoke-Subject -Action Plan -ControllerRoot $focusedRoot -ControllerName 'Controller Test' -AllowUpgrade $true
+    Assert-Result $focusedResetPlan.Result 'Plan' @('conflict') $focusedResetPlan.ExitCode
+    Assert-ReasonCode $focusedResetPlan.Result 'controller-upgrade-active-work' "Initializer writes must block while a task-set reset exists; nextAction: $($focusedResetPlan.Result.nextAction)"
+    Write-Output 'PASS init-controller focused task-set v3'
+  }
+  finally {
+    if (Test-Path -LiteralPath $focusedRoot) { Remove-Item -LiteralPath $focusedRoot -Recurse -Force }
+  }
+  exit 0
+}
+
+if ($FocusedTaskSetSeal) {
+  $focusedRoot = Join-Path ([IO.Path]::GetTempPath()) ('onboard-controller-task-set-seal-focus-' + [guid]::NewGuid().ToString('N'))
+  try {
+    Invoke-FreshTaskSetLifecycle -Root $focusedRoot | Out-Null
+    $manifestPath = Join-Path $focusedRoot '.codex-controller.json'
+    $manifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+    $markerPath = Join-Path $focusedRoot 'state\.task-set-reset-seal.json'
+    $markerBytes = [Text.Encoding]::UTF8.GetBytes("{}`n")
+    [IO.File]::WriteAllBytes($markerPath, $markerBytes)
+    foreach ($action in @('Plan','Apply','Verify')) {
+      $blocked = Invoke-Subject -Action $action -ControllerRoot $focusedRoot
+      Assert-Result $blocked.Result $action @('conflict') $blocked.ExitCode
+      Assert-ReasonCode $blocked.Result 'controller-task-set-reset-seal-recovery-required' "$action must fail closed while reset seal recovery is pending"
+      Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($manifestPath), $manifestBytes)) "$action must preserve exact manifest bytes while seal recovery is pending"
+      Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($markerPath), $markerBytes)) "$action must preserve exact seal marker bytes"
+    }
+    Write-Output 'PASS init-controller focused task-set seal recovery gate'
+  }
+  finally {
+    if (Test-Path -LiteralPath $focusedRoot) { Remove-Item -LiteralPath $focusedRoot -Recurse -Force }
+  }
+  exit 0
+}
+
+if ($FocusedStoreBackedV2) {
+  $focusedRoot = Join-Path ([IO.Path]::GetTempPath()) ('onboard-controller-store-v2-focus-' + [guid]::NewGuid().ToString('N'))
+  try {
+    $initial = Invoke-Subject -Action Apply -ControllerRoot $focusedRoot
+    Assert-Result $initial.Result 'Apply' @('applied') $initial.ExitCode
+    Assert-True ($initial.ExitCode -eq 0) 'Focused store-backed fixture must start as an intact generated controller'
+    $v2ManifestBytes = [byte[]](Write-TestManifest -Root $focusedRoot -Version 2)
+    $customPath = Join-Path $focusedRoot 'docs\cross-project-contracts.md'
+    $customBytes = [Text.Encoding]::UTF8.GetBytes("# preserved custom store-backed controller`n")
+    [IO.File]::WriteAllBytes($customPath, $customBytes)
+    $statePath = Join-Path $focusedRoot 'state\index.json'
+    $stateBytes = [IO.File]::ReadAllBytes($statePath)
+    foreach ($action in @('Plan','Apply')) {
+      $blocked = Invoke-Subject -Action $action -ControllerRoot $focusedRoot -AllowUpgrade $true
+      Assert-Result $blocked.Result $action @('conflict') $blocked.ExitCode
+      Assert-ReasonCode $blocked.Result 'controller-upgrade-unsupported-layout' "$action must fail closed for a store-backed v2 controller"
+      Assert-True (-not $blocked.Result.changed) "$action must not claim a store-backed v2 change"
+      Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $focusedRoot '.codex-controller.json')), $v2ManifestBytes)) "$action must preserve exact store-backed v2 manifest bytes"
+      Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($statePath), $stateBytes)) "$action must preserve exact store-backed state bytes"
+      Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($customPath), $customBytes)) "$action must preserve exact custom document bytes"
+    }
+    Write-Output 'PASS init-controller focused store-backed v2 fail-closed'
+  }
+  finally {
+    if (Test-Path -LiteralPath $focusedRoot) { Remove-Item -LiteralPath $focusedRoot -Recurse -Force }
+  }
+  exit 0
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('onboard-controller-tests-' + [guid]::NewGuid().ToString('N'))
@@ -154,19 +357,14 @@ try {
   Assert-True ($clonePlan.ExitCode -eq 0) 'A core.autocrlf=true checkout must pass controller Plan'
 
   $controllerRoot = Join-Path $testRoot 'controller'
-  $plan = Invoke-Subject -Action Plan -ControllerRoot $controllerRoot
-  Assert-Result $plan.Result 'Plan' @('planned') $plan.ExitCode
-  Assert-True ($plan.ExitCode -eq 0) 'Plan must exit 0'
-  Assert-True (-not (Test-Path -LiteralPath $controllerRoot)) 'Plan must not write the controller root'
-  Assert-True ($plan.Result.changed) 'Fresh Plan must report changed=true'
+  $lifecycle = Invoke-FreshTaskSetLifecycle -Root $controllerRoot
+  $plan = $lifecycle.Plan
+  $apply = $lifecycle.Apply
   Assert-True (@($plan.Result.plannedCreates).Count -eq $plannedPaths.Count) 'Fresh plan must declare the complete bounded scaffold'
   foreach ($relativePath in $plannedPaths) {
     Assert-True (@($plan.Result.plannedCreates) -contains $relativePath) "Fresh plan must declare $relativePath"
   }
 
-  $apply = Invoke-Subject -Action Apply -ControllerRoot $controllerRoot
-  Assert-Result $apply.Result 'Apply' @('applied') $apply.ExitCode
-  Assert-True ($apply.ExitCode -eq 0) 'Fresh Apply must exit 0'
   foreach ($relativePath in $managedPaths) {
     Assert-True (Test-Path -LiteralPath (Join-Path $controllerRoot $relativePath) -PathType Leaf) "Apply must create $relativePath"
   }
@@ -180,16 +378,17 @@ try {
   Assert-True ($manifestText.EndsWith("`n") -and -not $manifestText.Contains("`r") -and ($manifestText.TrimEnd("`n") -notmatch "`n")) 'Manifest must be compact JSON with one trailing LF'
   $manifest = $manifestText | ConvertFrom-Json
   $manifestFields = @($manifest.PSObject.Properties.Name)
-  Assert-True (@($manifestFields).Count -eq 8) 'Manifest must be a closed eight-field object'
-  foreach ($field in @('schemaVersion', 'generator', 'templateVersion', 'controllerName', 'controllerBinding', 'controllerTaskIntent', 'projectBindings', 'dispatchQueues')) {
+  Assert-True (@($manifestFields).Count -eq 10) 'Manifest must be a closed ten-field object'
+  foreach ($field in @('schemaVersion', 'generator', 'templateVersion', 'controllerName', 'controllerBinding', 'controllerTaskIntent', 'projectBindings', 'dispatchQueues', 'taskSetId', 'taskSetReset')) {
     Assert-True ($manifestFields -ccontains $field) "Manifest must contain $field"
   }
-  Assert-True ($manifest.schemaVersion -eq 2 -and $manifest.generator -ceq 'onboard-code-projects' -and $manifest.templateVersion -eq 2) 'Manifest version and generator must match the v2 contract'
+  Assert-True ($manifest.schemaVersion -eq 3 -and $manifest.generator -ceq 'onboard-code-projects' -and $manifest.templateVersion -eq 3) 'Manifest version and generator must match the v3 contract'
+  Assert-True ($manifest.taskSetId -ceq (Get-ExpectedTaskSetId $controllerRoot) -and $manifest.taskSetId -cmatch '^task-set-[0-9a-f]{64}$' -and $null -eq $manifest.taskSetReset) 'Fresh manifest must contain the safe root-derived task-set identity and no reset'
   Assert-True ($manifest.controllerName -ceq 'Controller Test' -and $null -eq $manifest.controllerBinding -and $null -eq $manifest.controllerTaskIntent -and @($manifest.projectBindings).Count -eq 0 -and @($manifest.dispatchQueues).Count -eq 0) 'Fresh manifest must contain the requested name and empty bindings/queues'
   $stateOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $controllerRoot 'tools\control-state.ps1') -Action Read -ControllerRoot $controllerRoot
   $stateExit = $LASTEXITCODE
   $stateResult = (($stateOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) | ConvertFrom-Json
-  Assert-True ($stateExit -eq 0 -and $stateResult.status -ceq 'verified' -and $stateResult.currentHash -ceq $stateResult.resultHash) 'Generated state adapter Read must verify the v2 manifest'
+  Assert-True ($stateExit -eq 0 -and $stateResult.status -ceq 'verified' -and $stateResult.currentHash -ceq $stateResult.resultHash) 'Generated state adapter Read must verify the v3 manifest'
   $chainOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $controllerRoot 'tools\chain-store.ps1') -Action Verify -ControllerRoot $controllerRoot
   $chainExit = $LASTEXITCODE
   $chainResult = (($chainOutput | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) | ConvertFrom-Json
@@ -205,9 +404,7 @@ try {
   Assert-Result $idempotent.Result 'Apply' @('applied') $idempotent.ExitCode
   Assert-True ($idempotent.ExitCode -eq 0 -and -not $idempotent.Result.changed) 'Byte-identical Apply must be idempotent'
 
-  $verify = Invoke-Subject -Action Verify -ControllerRoot $controllerRoot
-  Assert-Result $verify.Result 'Verify' @('verified') $verify.ExitCode
-  Assert-True ($verify.ExitCode -eq 0) 'Verify must exit 0 for an intact scaffold'
+  $verify = $lifecycle.Verify
 
   $namedRoot = Join-Path $testRoot 'named-controller'
   $namedApply = Invoke-Subject -Action Apply -ControllerRoot $namedRoot -ControllerName '__TEAM__'
@@ -220,7 +417,7 @@ try {
   $invalidManifestApply = Invoke-Subject -Action Apply -ControllerRoot $invalidManifestRoot
   Assert-Result $invalidManifestApply.Result 'Apply' @('applied') $invalidManifestApply.ExitCode
   $invalidManifestPath = Join-Path $invalidManifestRoot '.codex-controller.json'
-  $invalidManifestBytes = [Text.Encoding]::UTF8.GetBytes('{"schemaVersion":2,"generator":"onboard-code-projects","templateVersion":2,"controllerName":"Controller Test","controllerBinding":null,"controllerTaskIntent":null,"projectBindings":[],"dispatchQueues":[],"unknown":true}' + "`n")
+  $invalidManifestBytes = [Text.Encoding]::UTF8.GetBytes('{"schemaVersion":3,"generator":"onboard-code-projects","templateVersion":3,"controllerName":"Controller Test","controllerBinding":null,"controllerTaskIntent":null,"projectBindings":[],"dispatchQueues":[],"taskSetId":"task-set-invalid-fixture","taskSetReset":null,"unknown":true}' + "`n")
   [IO.File]::WriteAllBytes($invalidManifestPath, $invalidManifestBytes)
   $invalidManifestVerify = Invoke-Subject -Action Verify -ControllerRoot $invalidManifestRoot
   Assert-Result $invalidManifestVerify.Result 'Verify' @('conflict') $invalidManifestVerify.ExitCode
@@ -253,7 +450,7 @@ try {
   Write-TestManifest -Root $boundRoot -ControllerBinding $controllerBinding -ProjectBindings @($projectBinding) | Out-Null
   $boundVerify = Invoke-Subject -Action Verify -ControllerRoot $boundRoot -ControllerName $null
   Assert-Result $boundVerify.Result 'Verify' @('verified') $boundVerify.ExitCode
-  Assert-True ($boundVerify.ExitCode -eq 0) 'Read and Verify must accept a valid binding-only closed v2 manifest'
+  Assert-True ($boundVerify.ExitCode -eq 0) 'Read and Verify must accept a valid binding-only closed v3 manifest'
 
   $legacyRoot = Join-Path $testRoot 'legacy-v1-controller'
   $legacyApply = Invoke-Subject -Action Apply -ControllerRoot $legacyRoot
@@ -274,16 +471,54 @@ try {
   $legacyPlan = Invoke-Subject -Action Plan -ControllerRoot $legacyRoot -AllowUpgrade $true
   Assert-Result $legacyPlan.Result 'Plan' @('planned') $legacyPlan.ExitCode
   Assert-ReasonCode $legacyPlan.Result 'controller-upgrade-plan-ready' 'An authorized legacy Plan must expose the exact migration'
+  $expectedLegacyUpgrade = Get-ExpectedV3Manifest -Root $legacyRoot -Name 'Controller Test' -ControllerBinding $legacyBinding -ProjectBindings @($legacyProject)
+  Assert-True ($legacyPlan.Result.resultManifestHash -ceq $expectedLegacyUpgrade.Hash) 'Legacy Plan must publish the exact deterministic v3 manifest hash'
+  Assert-True ([string]$legacyPlan.Result.nextAction -cmatch 'Skill preflight') 'Legacy Plan must assign external quiescence proof to the Skill preflight'
   Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $legacyRoot '.codex-controller.json')), $legacyBytes)) 'Authorized Plan must remain write-free'
   $legacyUpgrade = Invoke-Subject -Action Apply -ControllerRoot $legacyRoot -AllowUpgrade $true
   Assert-Result $legacyUpgrade.Result 'Apply' @('applied') $legacyUpgrade.ExitCode
   Assert-ReasonCode $legacyUpgrade.Result 'controller-upgraded' 'Authorized Apply must migrate a known v1 controller'
-  $upgradedManifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $legacyRoot '.codex-controller.json') | ConvertFrom-Json
-  Assert-True ($upgradedManifest.schemaVersion -eq 2 -and $upgradedManifest.templateVersion -eq 2 -and @($upgradedManifest.dispatchQueues).Count -eq 0) 'Upgrade must create the closed v2 queue state'
+  $upgradedManifestBytes = [IO.File]::ReadAllBytes((Join-Path $legacyRoot '.codex-controller.json'))
+  $upgradedManifest = [Text.Encoding]::UTF8.GetString($upgradedManifestBytes) | ConvertFrom-Json
+  Assert-True ([Linq.Enumerable]::SequenceEqual($upgradedManifestBytes, [byte[]]$expectedLegacyUpgrade.Bytes) -and $legacyUpgrade.Result.resultManifestHash -ceq $expectedLegacyUpgrade.Hash) 'Legacy Apply must materialize the exact manifest bytes and hash from Plan'
+  Assert-True ($upgradedManifest.schemaVersion -eq 3 -and $upgradedManifest.templateVersion -eq 3 -and @($upgradedManifest.dispatchQueues).Count -eq 0 -and $upgradedManifest.taskSetId -ceq (Get-ExpectedTaskSetId $legacyRoot) -and $null -eq $upgradedManifest.taskSetReset) 'Upgrade must create the closed deterministic v3 task-set state'
   Assert-True ($upgradedManifest.controllerBinding.threadId -ceq 'legacy-thread' -and @($upgradedManifest.projectBindings).Count -eq 1 -and $upgradedManifest.projectBindings[0].entryThreadId -ceq 'legacy-entry') 'Upgrade must preserve controller and project bindings'
+  Assert-True ([string]$legacyUpgrade.Result.nextAction -cmatch 'Skill preflight' -and [string]$legacyUpgrade.Result.nextAction -cnotmatch '(?i)initializer verified') 'Upgrade result must not claim initializer verification of external runtime state'
   Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes($legacyContractsPath), $legacyContractsBytes)) 'Upgrade must preserve the human-edited cross-project contract'
   $legacyVerify = Invoke-Subject -Action Verify -ControllerRoot $legacyRoot -ControllerName $null
   Assert-Result $legacyVerify.Result 'Verify' @('verified') $legacyVerify.ExitCode
+
+  $legacyV2Root = Join-Path $testRoot 'legacy-v2-terminal-controller'
+  Invoke-Subject -Action Apply -ControllerRoot $legacyV2Root | Out-Null
+  Convert-ToLegacyLayout -Root $legacyV2Root
+  $legacyV2ProjectRoot = Join-Path $testRoot 'legacy-v2-business'
+  [IO.Directory]::CreateDirectory($legacyV2ProjectRoot) | Out-Null
+  $legacyV2Binding = [pscustomobject][ordered]@{ threadId='legacy-v2-controller'; codexProjectId='legacy-v2-controller-project'; hostId='legacy-v2-host'; projectRoot=$legacyV2Root }
+  $legacyV2Project = [pscustomobject][ordered]@{ entryThreadId='legacy-v2-current-entry'; codexProjectId='legacy-v2-business-project'; hostId='legacy-v2-host'; projectRoot=$legacyV2ProjectRoot }
+  $terminalTaskSpec = [pscustomobject][ordered]@{
+    objective='Preserve terminal history during upgrade'; nonGoals=@('write'); acceptance=@('old task id remains')
+    authorizedActions=@('read','test'); forbiddenActions=@('write'); baseline=[pscustomobject][ordered]@{ branch='N/A'; head='N/A'; dirtyHash='N/A' }
+    contract=[pscustomobject][ordered]@{ id='N/A'; version='N/A'; hash='N/A' }; dependencies=@(); authorizationRef='authref:legacy-v2-business-project:terminal'
+  }
+  $terminalTaskSpecHash = Get-TestHash ([Text.Encoding]::UTF8.GetBytes(($terminalTaskSpec | ConvertTo-Json -Depth 12 -Compress)))
+  $lastTerminal = [pscustomobject][ordered]@{
+    chainId='CHAIN-legacy-v2-terminal'; projectTaskId='legacy-v2-old-entry'; dispatchId='dispatch-legacy-v2-terminal'; generation=1; rework=0; accessMode='read'; modelClass='economy'
+    taskSpec=$terminalTaskSpec; taskSpecHash=$terminalTaskSpecHash; attemptFailures=@(); deliveryReconciliation=$null; authorizationResumedAt=$null
+    enqueuedAt='2026-08-01T00:00:00Z'; startedAt='2026-08-01T00:01:00Z'; phase='terminal'; resultState='completed'; evidenceHash=('a' * 64); finishedAt='2026-08-01T00:02:00Z'; cancelRequestedAt=$null; writeLease=$null
+  }
+  $legacyV2Queue = [pscustomobject][ordered]@{ projectRoot=$legacyV2ProjectRoot; active=$null; pending=@(); lastTerminal=$lastTerminal }
+  $legacyV2Bytes = [byte[]](Write-TestManifest -Root $legacyV2Root -Name 'Preserved V2 Controller' -ControllerBinding $legacyV2Binding -ProjectBindings @($legacyV2Project) -DispatchQueues @($legacyV2Queue) -Version 2)
+  $expectedV2Upgrade = Get-ExpectedV3Manifest -Root $legacyV2Root -Name 'Preserved V2 Controller' -ControllerBinding $legacyV2Binding -ProjectBindings @($legacyV2Project) -DispatchQueues @($legacyV2Queue)
+  $legacyV2Plan = Invoke-Subject -Action Plan -ControllerRoot $legacyV2Root -ControllerName 'Preserved V2 Controller' -AllowUpgrade $true
+  Assert-Result $legacyV2Plan.Result 'Plan' @('planned') $legacyV2Plan.ExitCode
+  Assert-True ($legacyV2Plan.Result.resultManifestHash -ceq $expectedV2Upgrade.Hash) 'V2 Plan must publish the exact deterministic v3 preservation hash'
+  Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $legacyV2Root '.codex-controller.json')), $legacyV2Bytes)) 'V2 Plan must preserve the exact legacy manifest bytes'
+  $legacyV2Upgrade = Invoke-Subject -Action Apply -ControllerRoot $legacyV2Root -ControllerName 'Preserved V2 Controller' -AllowUpgrade $true
+  Assert-Result $legacyV2Upgrade.Result 'Apply' @('applied') $legacyV2Upgrade.ExitCode
+  $legacyV2UpgradedBytes = [IO.File]::ReadAllBytes((Join-Path $legacyV2Root '.codex-controller.json'))
+  Assert-True ([Linq.Enumerable]::SequenceEqual($legacyV2UpgradedBytes, [byte[]]$expectedV2Upgrade.Bytes)) 'V2 Apply must preserve the full dispatch queues as exact v3 bytes'
+  $legacyV2Upgraded = [Text.Encoding]::UTF8.GetString($legacyV2UpgradedBytes) | ConvertFrom-Json
+  Assert-True ($legacyV2Upgraded.controllerName -ceq 'Preserved V2 Controller' -and $legacyV2Upgraded.controllerBinding.threadId -ceq 'legacy-v2-controller' -and $legacyV2Upgraded.dispatchQueues[0].lastTerminal.projectTaskId -ceq 'legacy-v2-old-entry') 'V2 Apply must preserve names, bindings, and old task IDs in terminal history'
 
   $activeUpgradeRoot = Join-Path $testRoot 'legacy-v2-active-controller'
   $activeUpgradeApply = Invoke-Subject -Action Apply -ControllerRoot $activeUpgradeRoot
@@ -310,6 +545,56 @@ try {
   Assert-Result $activeUpgrade.Result 'Plan' @('conflict') $activeUpgrade.ExitCode
   Assert-ReasonCode $activeUpgrade.Result 'controller-upgrade-active-work' 'Pinned runtime upgrade must wait for an empty dispatch queue'
   Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $activeUpgradeRoot '.codex-controller.json')), $activeManifestBytes)) 'Blocked runtime upgrade must preserve the exact active manifest'
+
+  $intentUpgradeRoot = Join-Path $testRoot 'legacy-v2-intent-controller'
+  Invoke-Subject -Action Apply -ControllerRoot $intentUpgradeRoot | Out-Null
+  Convert-ToLegacyLayout -Root $intentUpgradeRoot
+  $upgradeIntent = [pscustomobject][ordered]@{
+    operationId='legacy-v2-intent'; codexProjectId='legacy-v2-intent-project'; hostId='legacy-v2-host'; projectRoot=$intentUpgradeRoot
+    startedAt='2026-08-02T00:00:00Z'; clientThreadId=$null
+  }
+  $intentUpgradeBytes = [byte[]](Write-TestManifest -Root $intentUpgradeRoot -ControllerTaskIntent $upgradeIntent -Version 2)
+  $intentUpgrade = Invoke-Subject -Action Plan -ControllerRoot $intentUpgradeRoot -AllowUpgrade $true
+  Assert-Result $intentUpgrade.Result 'Plan' @('conflict') $intentUpgrade.ExitCode
+  Assert-ReasonCode $intentUpgrade.Result 'controller-upgrade-active-work' 'Upgrade must block while controller task creation intent exists'
+  Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $intentUpgradeRoot '.codex-controller.json')), $intentUpgradeBytes)) 'Blocked intent upgrade must preserve exact manifest bytes'
+
+  $unreleasedRoot = Join-Path $testRoot 'legacy-v2-unreleased-terminal-lease-controller'
+  Invoke-Subject -Action Apply -ControllerRoot $unreleasedRoot | Out-Null
+  Convert-ToLegacyLayout -Root $unreleasedRoot
+  $unreleasedBinding = [pscustomobject][ordered]@{ threadId='unreleased-controller'; codexProjectId='unreleased-controller-project'; hostId='unreleased-host'; projectRoot=$unreleasedRoot }
+  $unreleasedTerminal = [pscustomobject][ordered]@{
+    chainId='CHAIN-unreleased'; projectTaskId='active-entry'; dispatchId='dispatch-unreleased'; generation=1; rework=0; accessMode='write'; modelClass='economy'
+    taskSpec=$activeTaskSpec; taskSpecHash=$activeTaskSpecHash; attemptFailures=@(); deliveryReconciliation=$null; authorizationResumedAt=$null
+    enqueuedAt='2026-08-02T00:00:00Z'; startedAt='2026-08-02T00:01:00Z'; phase='terminal'; resultState='completed'; evidenceHash=('b' * 64); finishedAt='2026-08-02T00:02:00Z'; cancelRequestedAt=$null
+    writeLease=[pscustomobject][ordered]@{ leaseId='lease-unreleased'; acquiredAt='2026-08-02T00:01:00Z'; releasedAt=$null }
+  }
+  $unreleasedQueue = [pscustomobject][ordered]@{ projectRoot=$activeProjectRoot; active=$unreleasedTerminal; pending=@(); lastTerminal=$null }
+  $unreleasedBytes = [byte[]](Write-TestManifest -Root $unreleasedRoot -ControllerBinding $unreleasedBinding -ProjectBindings @($activeProject) -DispatchQueues @($unreleasedQueue) -Version 2)
+  $unreleasedUpgrade = Invoke-Subject -Action Plan -ControllerRoot $unreleasedRoot -AllowUpgrade $true
+  Assert-Result $unreleasedUpgrade.Result 'Plan' @('conflict') $unreleasedUpgrade.ExitCode
+  Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $unreleasedRoot '.codex-controller.json')), $unreleasedBytes)) 'Upgrade must preserve a manifest with an unreleased terminal write lease for manual recovery'
+
+  $upgradeOrphanRoot = Join-Path $testRoot 'legacy-v1-orphan-controller'
+  Invoke-Subject -Action Apply -ControllerRoot $upgradeOrphanRoot | Out-Null
+  Convert-ToLegacyLayout -Root $upgradeOrphanRoot
+  $upgradeOrphanBytes = [byte[]](Write-TestManifest -Root $upgradeOrphanRoot -Version 1)
+  $upgradeOrphan = Join-Path $upgradeOrphanRoot ('.codex-controller.' + [guid]::NewGuid().ToString('N').ToLowerInvariant() + '.tmp')
+  [IO.File]::WriteAllBytes($upgradeOrphan, [byte[]](1,2,3))
+  $upgradeOrphanPlan = Invoke-Subject -Action Plan -ControllerRoot $upgradeOrphanRoot -AllowUpgrade $true
+  Assert-Result $upgradeOrphanPlan.Result 'Plan' @('conflict') $upgradeOrphanPlan.ExitCode
+  Assert-ReasonCode $upgradeOrphanPlan.Result 'controller-candidate-orphaned' 'Upgrade must block on an orphan manifest candidate'
+  Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $upgradeOrphanRoot '.codex-controller.json')), $upgradeOrphanBytes) -and (Test-Path -LiteralPath $upgradeOrphan -PathType Leaf)) 'Blocked orphan upgrade must preserve both manifest and candidate bytes'
+
+  $resetUpgradeRoot = Join-Path $testRoot 'v3-reset-in-progress-controller'
+  Invoke-Subject -Action Apply -ControllerRoot $resetUpgradeRoot | Out-Null
+  $resetBinding = [pscustomobject][ordered]@{ threadId='reset-controller'; codexProjectId='reset-controller-project'; hostId='reset-host'; projectRoot=$resetUpgradeRoot }
+  $taskSetReset = New-TestPreparedTaskSetReset -Root $resetUpgradeRoot -ControllerBinding $resetBinding -OperationId 'reset-operation' -CreationOperationId 'create-reset-controller'
+  $resetManifestBytes = [byte[]](Write-TestManifest -Root $resetUpgradeRoot -ControllerBinding $resetBinding -TaskSetReset $taskSetReset)
+  $resetUpgrade = Invoke-Subject -Action Plan -ControllerRoot $resetUpgradeRoot -AllowUpgrade $true
+  Assert-Result $resetUpgrade.Result 'Plan' @('conflict') $resetUpgrade.ExitCode
+  Assert-ReasonCode $resetUpgrade.Result 'controller-upgrade-active-work' 'Initializer writes must block while a task-set reset exists'
+  Assert-True ([Linq.Enumerable]::SequenceEqual([IO.File]::ReadAllBytes((Join-Path $resetUpgradeRoot '.codex-controller.json')), $resetManifestBytes)) 'Blocked reset upgrade must preserve exact manifest bytes'
 
   $legacyTamperedRoot = Join-Path $testRoot 'legacy-v1-tampered-controller'
   $legacyTamperedApply = Invoke-Subject -Action Apply -ControllerRoot $legacyTamperedRoot
@@ -530,6 +815,14 @@ try {
   Assert-Result $brokenManifestPlan.Result 'Plan' @('conflict') $brokenManifestPlan.ExitCode
   Assert-ReasonCode $brokenManifestPlan.Result 'controller-filesystem-conflict' 'A structurally invalid manifest template must fail adapter prevalidation'
   Assert-True (-not (Test-Path -LiteralPath $brokenManifestRoot)) 'Manifest template prevalidation failure must remain write-free'
+  $canonicalManifestTemplate = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $templateRoot '.codex-controller.json')))
+  $duplicateTaskSetTemplate = $canonicalManifestTemplate.Replace('__TASK_SET_ID_JSON__', '__TASK_SET_ID_JSON____TASK_SET_ID_JSON__')
+  [IO.File]::WriteAllBytes((Join-Path $brokenSkillRoot 'templates\controller\.codex-controller.json'), [Text.Encoding]::UTF8.GetBytes($duplicateTaskSetTemplate))
+  $duplicatePlaceholderRoot = Join-Path $testRoot 'duplicate-task-set-placeholder-controller'
+  $duplicatePlaceholderPlan = Invoke-Subject -Action Plan -ControllerRoot $duplicatePlaceholderRoot -SubjectPath $brokenSubject
+  Assert-Result $duplicatePlaceholderPlan.Result 'Plan' @('conflict') $duplicatePlaceholderPlan.ExitCode
+  Assert-ReasonCode $duplicatePlaceholderPlan.Result 'controller-filesystem-conflict' 'Manifest rendering must require exactly one task-set placeholder'
+  Assert-True (-not (Test-Path -LiteralPath $duplicatePlaceholderRoot)) 'Duplicate task-set placeholder rejection must remain write-free'
   $brokenInvalidRoot = Invoke-Subject -Action Plan -ControllerRoot '.\relative-controller' -SubjectPath $brokenSubject
   Assert-Result $brokenInvalidRoot.Result 'Plan' @('invalid') $brokenInvalidRoot.ExitCode
   Assert-ReasonCode $brokenInvalidRoot.Result 'controller-root-unsupported' 'Invalid root validation must precede damaged template validation'

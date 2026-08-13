@@ -19,14 +19,17 @@ Run from the repository root on Windows PowerShell 5.1:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\index-mode.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\source-input.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\chain-store.tests.ps1
 node --test .\scripts\dispatch-return-runtime.tests.mjs
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\init-controller.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\control-state.tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\task-set-reset.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\skill-size.tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\skill-contract.tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -ReleaseGate
 ```
 
 In the installed maintainer environment, also run the official Skill validator supplied with Codex and record its exact command and result. Do not add that environment-owned path to repository CI.
@@ -67,7 +70,10 @@ Record the actual Codex Desktop and `codebase-memory` versions used, then verify
 - confirm an existing task-level permission override needs one in-task mode selection, with reload/restart only for changed global configuration, and never causes entry-task recreation;
 - verify an observed recurring boundary uses only a narrow `writable_roots` entry or precise prefix rule, requires explicit user authorization, and never uses `danger-full-access` or disabled approval;
 - confirm no projectless or worktree controller/entry task exists;
-- at an epoch threshold, prove this version returns `controller-epoch-rotation-unsupported` even when all activity counts are zero, never clears the old binding, calls runtime replacement alone, creates a replacement task, or archives the old task; retain explicit authorization and quiescence as future prerequisites;
+- from a disposable task outside the reset set, run a write-free task-set reset Plan and a separate Apply of its exact hash against an exact generated v3 controller. Prove only operation/from/strictly-derived-to/coordinator/exact old bindings/target roots/creation IDs/expected saved-project IDs/hosts bind the hash; summaries, history digests, quiescence, CHAIN heads, and timestamps do not. Prove `initialEvidenceHash` binds the complete closed Apply history/quiescence/active-CHAIN packet and `finalEvidenceHash` binds the final archived-history/quiescence/active-CHAIN packet; adapters recompute and audit changed evidence without another user authorization and reject forged evidence;
+- prove the runtime reset fence is prepared and read back before manifest Apply; then prove Apply creates project bootstrap tasks once and the controller bootstrap task once in standby with only the unique creation marker and no business handoff, fully reads/sanitizes/pre-summarizes old history, archives/readbacks old projects then old controller, rebuilds the final full summary when archived digest drifted, persists/delivers final handoffs, verifies standby acknowledgements, then performs runtime replacement prepare, manifest switch, runtime replacement commit/readback, manifest completion seal, runtime fence completion against the exact seal/manifest hash, `RecoverTaskSetResetSeal` as the sole unfreeze, and external-coordinator archive;
+- reproduce `historyDigest` by reading to `hasMore=false`, ordering closed `{turnId,status,completedAt}` rows oldest-to-newest, hashing UTF-8 compact JSON with SHA-256, and checking oldest/newest/count/EOF. Prove message text and tool output never enter the digest or replacement prompt and the sanitized summary has a separate `summaryHash`;
+- fault every reset boundary and prove forward-only same-operation recovery rebuilds final handoff from complete archived history, with no delta handoff, CHAIN mutation/rebinding, duplicate create, worker, automation, or false completion. Prove a seal marker blocks controller, CHAIN, and runtime writes until exact runtime completion readback releases it; a missing runtime packet may repair history/manifest but cannot unfreeze. For an empty/client-only/timeout create result, prove `create_thread` is never retried: reconcile only by unique marker plus exact saved project/root/host and initial-turn readback; zero or multiple matches remain frozen/unknown. Prove missing task APIs, ambiguous/multi-root or unprovable cwd, custom/legacy/store-backed v2, changed stable scope, nonquiet state, forged closed readback packets, and stale CHAIN heads fail closed;
 - sanitize roots, IDs, prompts, and tool output before retaining evidence.
 
 ## Dogfood records
@@ -86,7 +92,7 @@ Complete 3-5 dogfood records before release. Leave rows unchecked and blank unti
 
 - [ ] **Immutable pre-controller upgrade:** install an old immutable pre-controller revision, capture its no-controller v1 result, upgrade to the candidate, and prove the same no-controller request still returns the exact v1 per-project schema.
 - [ ] **Legacy trusted-controller separation:** exercise an old `trusted-controller` input and the new generic controller input separately. Confirm the candidate does not reinterpret or automatically migrate legacy state, files, or bindings.
-- [ ] **Generated controller upgrade:** install exact immutable generated v1 and pre-store v2 controllers. Prove the first result requires separate authorization, then run Plan → authorized Apply → Verify. Confirm bindings, human contracts, and any v2 queues survive; v1 queues start empty; the memory store verifies; a caught partial replacement rolls back; and an edited managed file remains a conflict.
+- [ ] **Generated controller upgrade:** install exact immutable pre-store v1 and pre-store v2 controllers. Prove the first result requires separate authorization, then run Plan → authorized Apply → Verify. Confirm only state present in those exact known manifests survives, the memory store verifies, a caught partial replacement rolls back, and edited, custom, unknown, or store-backed v2 inventories fail closed for a separately reviewed migration.
 - [ ] **Legacy ledger shadow migration:** prepare and verify without changing sources, retain source hashes and semantic-validator hash, prove a source change blocks cutover, preserve exact legacy bytes, and apply only after authoritative evidence says the controller task is idle.
 - [ ] **Rollback rehearsal:** after a disposable candidate run, stop dispatch, restore the prior immutable revision, preserve the controller manifest and tasks, and prove existing project entry tasks remain usable without destructive cleanup.
 
