@@ -8,10 +8,10 @@
 
 开源仓库：[libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-`onboard-code-projects` 是减少 Codex Desktop 多仓库上下文污染的工作流隔离 Skill：为每个仓库建立独立、经过核验且可复用的项目任务和 `codebase-memory` 索引，并通过可选中控协调跨项目工作、沉淀并复用有证据支撑的成功与确定性失败经验。
+`onboard-code-projects` 是面向 Codex Desktop 的多仓库工作流隔离 Skill：通过每仓独立、经过核验且可复用的项目任务和 `codebase-memory` 索引降低上下文污染风险；可选中控协调跨项目工作，按任务难度与风险自动分配 `economy`、`balanced` 或 `frontier` 模型等级，并复用有证据支撑的成功与确定性失败经验。
 
 - **适用于：** 工作横跨两个及以上仓库。
-- **你会得到：** 绑定到精确根目录、经过核验的项目入口任务，每个仓库对应一个 `codebase-memory` 索引，以及负责跨项目协作的可选中控。
+- **你会得到：** 绑定到精确根目录、经过核验的项目入口任务，每个仓库对应一个 `codebase-memory` 索引，以及负责跨项目协作和模型分层的可选中控。
 - **它不会：** 创建或保存 Codex 项目，也不会代替用户授权或批准权限。
 - **它不是：** 安全沙箱，也不会部署软件。
 
@@ -24,6 +24,7 @@
 | 上下文污染 | 每个精确项目根目录、项目指令、证据和修改都留在独立且可复用的任务中。 |
 | 仓库与基线漂移 | 执行前核验已保存项目、根目录、分支、HEAD、工作区和索引。 |
 | 任务膨胀 | 普通工作与同范围返工复用同一个项目入口任务。 |
+| 模型与任务不匹配 | 有界常规任务使用 `economy`，普通单项目工程使用 `balanced`，跨项目契约、高风险正确性、架构重新基线或根因仍不明确的任务使用 `frontier`；派发时仅解析当前可用的具体模型。 |
 | 完成状态丢失 | 支持前台监控；插件能力满足时，还可使用耐久结果回传。 |
 | 中控记忆膨胀 | 对长期跨项目工作使用有界记忆，不把不断增长的任务台账全部加载进会话。 |
 
@@ -42,14 +43,14 @@
 ## 你会得到什么
 
 - 每个 source：一个已核验的保存项目绑定、一个可复用的本地入口任务和一个 `codebase-memory` 索引。
-- 可选：位于所有业务仓库之外的一个中控目录和中控任务。
+- 可选：位于所有业务仓库之外的中控目录和中控任务，包含逐项目队列以及按任务难度与风险进行的模型分层。
 - 可选：耐久结果回传需要插件 Stop Hook 与 Node.js；自动唤醒还需要额外的规则、worker 和自动化能力。
 
 Skill 不能创建 Codex 已保存项目。用户需先在 Codex Desktop 中添加每个精确目录，Skill 再核验并使用该身份。
 
 ## 核心流程
 
-下面两张图展示产品主流程和经验复用闭环。详细的[派发与验收](./references/controller-runtime.md#cross-project-dispatch-and-acceptance-简体中文)和[任务组重置](./references/controller-runtime.md#controller-task-set-reset-简体中文)流程图放在中控运行时参考中。
+下面两张图展示产品主流程和经验复用闭环。详细的[模型分层派发与验收](./references/controller-runtime.md#cross-project-dispatch-and-acceptance-简体中文)和[任务组重置](./references/controller-runtime.md#controller-task-set-reset-简体中文)流程图放在中控运行时参考中。
 
 ### 1. 接入或复用每个仓库
 

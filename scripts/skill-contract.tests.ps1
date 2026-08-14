@@ -229,6 +229,8 @@ Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*(?:m
   'English README first screen must lead with the Codex Desktop multi-repository context-pollution problem and Skill category'
 Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*evidence-backed)(?=[^\r\n]*reuse)(?=[^\r\n]*(?:accepted )?success(?:es)?)(?=[^\r\n]*deterministic failure)[^\r\n]+$' `
   'English README positioning sentence must highlight evidence-backed success and deterministic-failure reuse'
+Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*(?:automatically )?(?:route|select|assign))(?=[^\r\n]*model class)(?=[^\r\n]*(?:complexity|difficulty))(?=[^\r\n]*risk)[^\r\n]+$' `
+  'English README first screen must highlight complexity-and-risk-based model routing'
 Assert-Contains $englishPreamble '(?i)\b(?:two or more|2\+)\s+(?:related\s+)?repositories\b' `
   'English README first screen must state the two-or-more-repository trigger'
 Assert-Contains $englishPreamble '(?is)(?:exact-root|exact root).{0,160}verified.{0,160}project-bound entry tasks.{0,300}codebase-memory.{0,300}optional controller' `
@@ -340,6 +342,8 @@ Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*\u591a\u4
   'Chinese README first screen must lead with the Codex Desktop multi-repository context-pollution problem and Skill category'
 Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*\u6709\u8bc1\u636e\u652f\u6491)(?=[^\r\n]*\u590d\u7528)(?=[^\r\n]*\u6210\u529f)(?=[^\r\n]*\u786e\u5b9a\u6027\u5931\u8d25)[^\r\n]+$' `
   'Chinese README positioning sentence must highlight evidence-backed success and deterministic-failure reuse'
+Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*\u81ea\u52a8)(?=[^\r\n]*(?:\u96be\u5ea6|\u590d\u6742\u5ea6))(?=[^\r\n]*\u98ce\u9669)(?=[^\r\n]*\u6a21\u578b\u7b49\u7ea7)[^\r\n]+$' `
+  'Chinese README first screen must highlight complexity-and-risk-based model routing'
 Assert-Contains $zhPreamble '(?is)(?:2\s*\+|2\s*\u4e2a\u53ca\u4ee5\u4e0a|\u4e24\u4e2a\u53ca\u4ee5\u4e0a).{0,20}\u4ed3\u5e93' `
   'Chinese README first screen must state the two-or-more-repository trigger'
 Assert-Contains $zhPreamble '(?is)\u7cbe\u786e\u6839\u76ee\u5f55.{0,160}(?:\u5df2\u6838\u9a8c|\u7ecf\u8fc7\u6838\u9a8c).{0,160}\u9879\u76ee(?:\u7ed1\u5b9a)?\u5165\u53e3\u4efb\u52a1.{0,300}codebase-memory.{0,300}\u53ef\u9009\u4e2d\u63a7' `

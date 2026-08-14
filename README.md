@@ -8,10 +8,10 @@
 
 Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-`onboard-code-projects` is the Codex Desktop multi-repository workflow-isolation Skill that reduces context pollution with verified, reusable project tasks and `codebase-memory` indexes, plus an optional controller for cross-project coordination and evidence-backed reuse of accepted successes and deterministic failures.
+`onboard-code-projects` is the Codex Desktop multi-repository workflow-isolation Skill that reduces context pollution with verified, reusable project tasks and `codebase-memory` indexes. Its optional controller coordinates cross-project work, automatically routes each dispatch to an `economy`, `balanced`, or `frontier` model class by complexity and risk, and reuses evidence-backed accepted successes and deterministic failures.
 
 - **Use when:** work crosses two or more related repositories.
-- **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination.
+- **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination and model routing.
 - **It does not:** create saved Codex projects or approve permissions.
 - **It is not:** a security sandbox, and it does not deploy software.
 
@@ -24,6 +24,7 @@ Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-cod
 | Context pollution | Keeps each exact project root, its instructions, evidence, and changes in a separate reusable task. |
 | Repository and baseline drift | Verifies the saved project, root, branch, HEAD, working tree, and index before work starts. |
 | Task proliferation | Reuses one project entry task for normal work and same-scope rework. |
+| Model cost/risk mismatch | Assigns bounded routine work to `economy`, normal single-project engineering to `balanced`, and cross-project contracts, high-risk correctness, architecture rebaseline, or unresolved root-cause ambiguity to `frontier`; the concrete model is resolved from those available at dispatch time. |
 | Lost completion signals | Supports foreground monitoring and, when the required plugin capabilities are available, durable result return. |
 | Controller memory growth | Keeps long-running cross-project work bounded instead of loading one ever-growing task ledger. |
 
@@ -42,14 +43,14 @@ Project entry tasks may still use subagents internally; the two approaches are c
 ## What you get
 
 - For each source: one verified saved-project binding, one reusable local entry task, and one `codebase-memory` index.
-- Optionally: one controller directory and controller task outside every business repository.
+- Optionally: one controller directory and controller task outside every business repository, with per-project queues and complexity-and-risk-based model routing.
 - Optionally: durable result return when the plugin Stop Hook and Node.js are available; automatic wake additionally requires validated rule, worker, and automation capabilities.
 
 The Skill cannot create a saved Codex project. Add each exact directory in Codex Desktop first; the Skill verifies and uses that identity.
 
 ## Core workflows
 
-The two flows below show the product journey and its evidence-reuse loop. Detailed [dispatch and acceptance](./references/controller-runtime.md#sealed-dispatch-and-return-evidence) and [task-set reset](./references/controller-runtime.md#controller-task-set-reset) diagrams remain in the controller runtime reference.
+The two flows below show the product journey and its evidence-reuse loop. Detailed [model-routed dispatch and acceptance](./references/controller-runtime.md#sealed-dispatch-and-return-evidence) and [task-set reset](./references/controller-runtime.md#controller-task-set-reset) diagrams remain in the controller runtime reference.
 
 ### 1. Onboard or reuse each repository
 
