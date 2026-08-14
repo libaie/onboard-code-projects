@@ -245,10 +245,14 @@ foreach ($row in @('Single long (?:conversation|task)', 'Subagents?', '(?:This S
 
 $englishMermaid = @(Get-MermaidBlocks -Text $readme)
 $chineseMermaid = @(Get-MermaidBlocks -Text $readmeZh)
-if ($englishMermaid.Count -ne 4 -or $chineseMermaid.Count -ne 4) {
-  throw 'Both public READMEs must contain exactly four detailed workflow diagrams'
+$referenceMermaid = @(Get-MermaidBlocks -Text $controllerReference)
+if ($englishMermaid.Count -ne 2 -or $chineseMermaid.Count -ne 2) {
+  throw 'Both public READMEs must contain exactly two product-level workflow diagrams'
 }
-for ($diagramIndex = 0; $diagramIndex -lt 4; $diagramIndex++) {
+if ($referenceMermaid.Count -ne 4) {
+  throw 'The controller runtime reference must contain English and Chinese versions of both advanced workflow diagrams'
+}
+for ($diagramIndex = 0; $diagramIndex -lt 2; $diagramIndex++) {
   $englishNodeIds = @([regex]::Matches($englishMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?![A-Za-z0-9_])') | ForEach-Object { $_.Value } | Sort-Object -Unique)
   $chineseNodeIds = @([regex]::Matches($chineseMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?![A-Za-z0-9_])') | ForEach-Object { $_.Value } | Sort-Object -Unique)
   $englishDeclaredNodeIds = @([regex]::Matches($englishMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique)
@@ -265,13 +269,36 @@ for ($diagramIndex = 0; $diagramIndex -lt 4; $diagramIndex++) {
     throw "English and Chinese workflow diagram $($diagramIndex + 1) must use the same node and edge topology"
   }
 }
+foreach ($pair in @(@(0, 1), @(2, 3))) {
+  if ((Get-MermaidTopology -Block $referenceMermaid[$pair[0]]) -cne (Get-MermaidTopology -Block $referenceMermaid[$pair[1]])) {
+    throw 'English and Chinese advanced workflow diagrams must use the same node and edge topology'
+  }
+}
+for ($diagramIndex = 0; $diagramIndex -lt 4; $diagramIndex++) {
+  $nodeIds = @([regex]::Matches($referenceMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?![A-Za-z0-9_])') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  $declaredNodeIds = @([regex]::Matches($referenceMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  if (($nodeIds -join ',') -cne ($declaredNodeIds -join ',')) {
+    throw "Advanced workflow diagram $($diagramIndex + 1) must not rely on implicit or cross-diagram nodes"
+  }
+  if ($declaredNodeIds.Count -lt 5 -or $declaredNodeIds.Count -gt 15) {
+    throw "Advanced workflow diagram $($diagramIndex + 1) must keep a readable 5-15-node topology"
+  }
+}
+Assert-Contains -Text $readmeZh -Pattern '\./references/controller-runtime\.md#cross-project-dispatch-and-acceptance-' `
+  -Message 'Chinese README must link directly to the Chinese dispatch workflow'
+Assert-Contains -Text $readmeZh -Pattern '\./references/controller-runtime\.md#controller-task-set-reset-' `
+  -Message 'Chinese README must link directly to the Chinese reset workflow'
 foreach ($expectation in @(
   '(?is)needs-project-add.{0,1200}AGENTS.{0,1200}codebase-memory.{0,1200}controller',
+  '(?is)ExperienceRead.{0,1200}accepted success.{0,1200}deterministic failure.{0,1200}repair.{0,800}rebaseline.{0,800}convergence-failed'
+)) {
+  Assert-Contains ($englishMermaid -join "`n") $expectation 'README diagrams must expose the product overview and experience reuse'
+}
+foreach ($expectation in @(
   '(?is)FIFO.{0,1000}parallel.{0,1000}model.{0,1200}approval.{0,1200}receipt.{0,600}native-callback.{0,600}foreground.{0,1200}accept',
-  '(?is)ExperienceRead.{0,1200}accepted success.{0,1200}deterministic failure.{0,1200}repair.{0,800}rebaseline.{0,800}convergence-failed',
   '(?is)Plan.{0,600}planHash.{0,600}Apply.{0,1200}standby.{0,1200}archive.{0,1200}handoff.{0,1200}seal.{0,800}unfreeze'
 )) {
-  Assert-Contains ($englishMermaid -join "`n") $expectation 'English workflow diagrams must expose every major public workflow'
+  Assert-Contains ($referenceMermaid -join "`n") $expectation 'Runtime reference diagrams must preserve advanced dispatch and reset flows'
 }
 
 Assert-InOrder $readme @(

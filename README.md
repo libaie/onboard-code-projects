@@ -49,7 +49,7 @@ The Skill cannot create a saved Codex project. Add each exact directory in Codex
 
 ## Core workflows
 
-The four flows below cover the public lifecycle. Exact payloads, hashes, reason codes, and recovery commands remain in the [controller runtime reference](./references/controller-runtime.md).
+The two flows below show the product journey and its evidence-reuse loop. Detailed [dispatch and acceptance](./references/controller-runtime.md#sealed-dispatch-and-return-evidence) and [task-set reset](./references/controller-runtime.md#controller-task-set-reset) diagrams remain in the controller runtime reference.
 
 ### 1. Onboard or reuse each repository
 
@@ -74,35 +74,7 @@ flowchart TD
 
 Saved projects stay user-owned. The Skill creates neither projectless tasks nor worktrees, and the optional controller must remain outside every business repository.
 
-### 2. Coordinate, dispatch, and accept cross-project work
-
-```mermaid
-flowchart TD
-    D1["Cross-project request"] --> D2["Four-quadrant intake; freeze objective, contract, scope, and acceptance"]
-    D2 --> D3["Queue work by project"]
-    D3 -->|Same project runs one active task in FIFO order| D4
-    D3 -->|Independent projects run in parallel| D4
-    D4["Seal the dispatch and select the model class by complexity and risk"] --> D5["Send only to the verified project entry task"]
-    D5 -.->|Timeout or empty delivery| D15["Stop or hold only this lane; never resend blindly or expand authority"]
-    D5 -->|Delivered| D6["Re-read AGENTS and verify root, baseline, and scope"]
-    D6 --> D7{"Runtime approval required?"}
-    D7 -->|Yes| D8["Only this project waits; other lanes continue"]
-    D7 -->|No| D9["Implement and test inside the repository"]
-    D8 -->|Approved| D9
-    D8 -.->|Declined| D15
-    D9 --> D10{"Available return channel?"}
-    D10 -->|Hook receipt, with optional wake| D11["Controller re-reads branch, HEAD, diff, tests, and contract; wake is not acceptance"]
-    D10 -->|native-callback| D11
-    D10 -->|foreground| D11
-    D11 --> D12{"Result and evidence disposition?"}
-    D12 -->|accepted success| D13["Record success, release the lease, and start the next FIFO item"]
-    D12 -->|Eligible business or review failure| D14["Keep the lease and enter the bounded convergence flow below"]
-    D12 -->|Cancelled, declined, or non-retryable blocked| D15
-```
-
-The controller writes governance state only. Repository edits and tests remain in the exact project entry task; a callback or receipt only signals that evidence is ready to inspect.
-
-### 3. Reuse evidence-backed experience and stop retry loops
+### 2. Reuse evidence-backed experience and stop retry loops
 
 ```mermaid
 flowchart TD
@@ -128,29 +100,6 @@ flowchart TD
 ```
 
 This is evidence reuse, not automatic learning. A changed material condition needs direct canonical evidence; renaming a task, opening a new conversation, or changing an unproved hash cannot erase a known deterministic failure. Only a zero-repository-write transport, tool-bootstrap, or payload-parse failure may receive one same-attempt preflight replay.
-
-### 4. Refresh a long-lived controller task set
-
-```mermaid
-flowchart TD
-    R1["Explicit reset request from an external coordinator"] --> R2{"Exact generated v3, task APIs, Node.js, single roots, and quiet state?"}
-    R2 -->|No| R3["Block without changing or deleting tasks"]
-    R2 -->|Yes| R4["Read-only Plan returns planHash"]
-    R4 --> R5["Separately authorized Apply uses the exact planHash"]
-    R5 --> R6["Re-read complete history, quiet state, and active work; prepare the runtime fence"]
-    R6 --> R7["Create bootstrap-only standby tasks exactly once; projects first, controller last"]
-    R7 --> R8["Read, sanitize, bound, and hash every old task history"]
-    R8 --> R9["Archive old project tasks, then the old controller, with readback"]
-    R9 --> R10{"Did archived history change?"}
-    R10 -->|Yes| R11["Re-read and rebuild the complete final handoff"]
-    R10 -->|No| R12["Persist and send the bounded handoff; verify standby acknowledgements"]
-    R11 --> R12
-    R12 --> R13["Atomically switch the whole task set; commit and read back runtime state"]
-    R13 --> R14["Seal, recover, and unfreeze; retain the same heartbeat"]
-    R14 --> R15["New tasks inherit canonical state; old tasks stay archived; coordinator archives last"]
-```
-
-Apply is forward-only. An interruption keeps the set frozen and resumes the same operation; it never rolls back, deletes tasks, mutates canonical work records, or retries a task creation whose result is unknown.
 
 ## Quick start
 

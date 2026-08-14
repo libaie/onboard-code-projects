@@ -43,6 +43,62 @@ Before a final-generation dispatch, reconcile every mutable readiness proof and 
 
 ## Sealed dispatch and return evidence
 
+This complete flow is intentionally kept in the runtime reference rather than the project overview:
+
+```mermaid
+flowchart TD
+    D1["Cross-project request"] --> D2["Four-quadrant intake; freeze objective, contract, scope, and acceptance"]
+    D2 --> D3["Queue work by project"]
+    D3 -->|Same project runs one active task in FIFO order| D4
+    D3 -->|Independent projects run in parallel| D4
+    D4["Seal the dispatch and select the model class by complexity and risk"] --> D5["Send only to the verified project entry task"]
+    D5 -.->|Timeout or empty delivery| D15["Stop or hold only this lane; never resend blindly or expand authority"]
+    D5 -->|Delivered| D6["Re-read AGENTS and verify root, baseline, and scope"]
+    D6 --> D7{"Runtime approval required?"}
+    D7 -->|Yes| D8["Only this project waits; other lanes continue"]
+    D7 -->|No| D9["Implement and test inside the repository"]
+    D8 -->|Approved| D9
+    D8 -.->|Declined| D15
+    D9 --> D10{"Available return channel?"}
+    D10 -->|Hook receipt, with optional wake| D11["Controller re-reads branch, HEAD, diff, tests, and contract; wake is not acceptance"]
+    D10 -->|native-callback| D11
+    D10 -->|foreground| D11
+    D11 --> D12{"Result and evidence disposition?"}
+    D12 -->|accepted success| D13["Record success, release the lease, and start the next FIFO item"]
+    D12 -->|Eligible business or review failure| D14["Keep the lease and enter the bounded convergence flow below"]
+    D12 -->|Cancelled, declined, or non-retryable blocked| D15
+```
+
+The controller writes governance state only. Repository edits and tests remain in the exact project entry task; a callback or receipt only signals that evidence is ready to inspect.
+
+### Cross-project dispatch and acceptance (简体中文)
+
+```mermaid
+flowchart TD
+    D1["跨项目请求"] --> D2["四象限接收；冻结目标、契约、范围和验收标准"]
+    D2 --> D3["按项目进入队列"]
+    D3 -->|同一项目只运行一个活动任务并按 FIFO 排队| D4
+    D3 -->|独立项目并行执行| D4
+    D4["密封派发包，并按难度与风险选择模型等级"] --> D5["只发送给已核验的项目入口任务"]
+    D5 -.->|超时或空返回| D15["只停止或挂起当前通道；禁止盲目重发或扩大授权"]
+    D5 -->|已送达| D6["重读 AGENTS，核验根目录、基线和范围"]
+    D6 --> D7{"需要运行时授权？"}
+    D7 -->|是| D8["只等待当前项目，其他通道继续"]
+    D7 -->|否| D9["在仓库内实现并测试"]
+    D8 -->|已批准| D9
+    D8 -.->|已拒绝| D15
+    D9 --> D10{"当前可用的回传通道？"}
+    D10 -->|Hook 回执，可选自动唤醒| D11["中控重读分支、HEAD、diff、测试和契约；唤醒不等于验收"]
+    D10 -->|native-callback| D11
+    D10 -->|foreground| D11
+    D11 --> D12{"结果与证据应如何处置？"}
+    D12 -->|已接受的成功| D13["记录成功、释放租约并启动下一个 FIFO 项"]
+    D12 -->|符合条件的业务或评审失败| D14["保留租约并进入有界收敛流程"]
+    D12 -->|已取消、拒绝授权或不可重试的阻断| D15
+```
+
+中控只写治理状态。仓库修改和测试始终留在精确项目入口任务中；callback 或 receipt 只表示已有证据可供读取，不代表任务已通过验收。
+
 Use a single sealed dispatch for each attempt. Its identity is exactly `chainId`, `projectTaskId`, `dispatchId`, `generation`, `rework`, and `taskSpecHash`. Persist the canonical `taskSpec` and computed `taskSpecHash` before delivery. `enqueue-dispatch` first injects `dispatchIdentity={chainId,projectTaskId,dispatchId,generation,rework}`; `retry-dispatch` accepts a refreshed unsealed `taskSpec` and reseals it, so two generations cannot share the same hash. A retry may refresh acceptance evidence, HEAD/worktree baseline, dependencies, and readiness proof, but must preserve objective, non-goals, authorized/forbidden actions, contract, authorization, return route, branch, operation class, targets, capabilities, rollback, and all prior dependencies. Verify readback before delivery. The closed specification contains `objective`, `nonGoals`, `acceptance`, `authorizedActions`, `forbiddenActions`, exact `baseline`, exact `contract`, `dependencies`, an opaque project-scoped `authorizationRef`, `readiness`, `returnRoute`, and the injected identity.
 
 Freeze `returnRoute={mode,controllerThreadId,hostId}` in the same hash. For `native-callback` or either receipt mode, it must name the exact verified controller task and host; `foreground` uses `N/A` for both. The route binds one at-most-once callback. Controller history stores no credentials or secrets.
@@ -94,6 +150,52 @@ At startup read only `memory/MEMORY.md`, then `chain-store.ps1 -Action Read`. Lo
 The memory summary is capped at 200 lines and 25 KiB. Terminal CHAINs move to monthly archives.
 
 ## Controller task-set reset
+
+The public README links here for the complete forward-only reset flow:
+
+```mermaid
+flowchart TD
+    R1["Explicit reset request from an external coordinator"] --> R2{"Exact generated v3, task APIs, Node.js, single roots, and quiet state?"}
+    R2 -->|No| R3["Block without changing or deleting tasks"]
+    R2 -->|Yes| R4["Read-only Plan returns planHash"]
+    R4 --> R5["Separately authorized Apply uses the exact planHash"]
+    R5 --> R6["Re-read complete history, quiet state, and active work; prepare the runtime fence"]
+    R6 --> R7["Create bootstrap-only standby tasks exactly once; projects first, controller last"]
+    R7 --> R8["Read, sanitize, bound, and hash every old task history"]
+    R8 --> R9["Archive old project tasks, then the old controller, with readback"]
+    R9 --> R10{"Did archived history change?"}
+    R10 -->|Yes| R11["Re-read and rebuild the complete final handoff"]
+    R10 -->|No| R12["Persist and send the bounded handoff; verify standby acknowledgements"]
+    R11 --> R12
+    R12 --> R13["Atomically switch the whole task set; commit and read back runtime state"]
+    R13 --> R14["Seal, recover, and unfreeze; retain the same heartbeat"]
+    R14 --> R15["New tasks inherit canonical state; old tasks stay archived; coordinator archives last"]
+```
+
+Apply is forward-only. An interruption keeps the set frozen and resumes the same operation; it never rolls back, deletes tasks, mutates canonical work records, or retries a task creation whose result is unknown.
+
+### Controller task-set reset (简体中文)
+
+```mermaid
+flowchart TD
+    R1["由集合外 coordinator 显式请求重置"] --> R2{"精确生成的 v3、任务 API、Node.js、单根目录且状态静默？"}
+    R2 -->|否| R3["不修改也不删除任务，安全阻断"]
+    R2 -->|是| R4["只读 Plan 返回 planHash"]
+    R4 --> R5["单独授权的 Apply 使用精确 planHash"]
+    R5 --> R6["重读完整历史、静默状态与活动工作；准备运行时 fence"]
+    R6 --> R7["仅创建一次 bootstrap 待命任务；项目在前，中控最后"]
+    R7 --> R8["读取、脱敏、限长并哈希每个旧任务的完整历史"]
+    R8 --> R9["先归档旧项目任务，再归档旧中控，并逐一回读"]
+    R9 --> R10{"归档后的历史发生变化？"}
+    R10 -->|是| R11["重新读取并重建完整最终交接"]
+    R10 -->|否| R12["持久化并发送有界交接；核验待命任务确认"]
+    R11 --> R12
+    R12 --> R13["原子切换整组任务；提交并回读运行时状态"]
+    R13 --> R14["封存、恢复并解冻；继续使用同一个 heartbeat"]
+    R14 --> R15["新任务继承规范状态；旧任务保持归档；coordinator 最后归档"]
+```
+
+Apply 是前向恢复流程。中断时保持冻结并继续同一 operation；不会回滚、删除任务、修改规范工作记录，也不会重试结果未知的任务创建。
 
 Task-set reset is available only when the installed controller is an exact generated v3 controller and its exact installed controller-state and return-runtime adapters pass this contract. Generated v1/v2, custom, legacy, and store-backed v2 adapters are unsupported and fail closed with `controller-capability-unavailable`; never emulate reset with one-sided state replacement. The user must explicitly set `resetControllerTasks=true`. A separate coordinator task outside the scoped reset set executes the reset and is archived last. If the request originated in a scoped task, hand it to that non-scoped coordinator before Plan; never let a task replace itself.
 
