@@ -8,7 +8,7 @@
 
 Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-`onboard-code-projects` is the Codex Desktop multi-repository workflow-isolation Skill that reduces context pollution by giving each repository its own verified, reusable project task and `codebase-memory` index, with an optional controller for cross-project coordination.
+`onboard-code-projects` is the Codex Desktop multi-repository workflow-isolation Skill that reduces context pollution with verified, reusable project tasks and `codebase-memory` indexes, plus an optional controller for cross-project coordination and evidence-backed reuse of accepted successes and deterministic failures.
 
 - **Use when:** work crosses two or more related repositories.
 - **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination.

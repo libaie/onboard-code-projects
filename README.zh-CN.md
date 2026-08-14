@@ -8,7 +8,7 @@
 
 开源仓库：[libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-`onboard-code-projects` 是减少 Codex Desktop 多仓库上下文污染的工作流隔离 Skill：为每个仓库建立独立、经过核验且可复用的项目任务和 `codebase-memory` 索引，并通过可选中控协调跨项目工作。
+`onboard-code-projects` 是减少 Codex Desktop 多仓库上下文污染的工作流隔离 Skill：为每个仓库建立独立、经过核验且可复用的项目任务和 `codebase-memory` 索引，并通过可选中控协调跨项目工作、沉淀并复用有证据支撑的成功与确定性失败经验。
 
 - **适用于：** 工作横跨两个及以上仓库。
 - **你会得到：** 绑定到精确根目录、经过核验的项目入口任务，每个仓库对应一个 `codebase-memory` 索引，以及负责跨项目协作的可选中控。
