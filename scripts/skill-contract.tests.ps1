@@ -44,6 +44,18 @@ function Assert-InOrder {
   }
 }
 
+function Get-MermaidBlocks {
+  param([string]$Text)
+  return @([regex]::Matches($Text, '(?ms)^```mermaid\s*\r?\n(?<body>.*?)^```\s*$') | ForEach-Object { $_.Groups['body'].Value })
+}
+
+function Get-MermaidTopology {
+  param([string]$Block)
+  $topology = [regex]::Replace($Block, '(?s)(\[|\{)"[^"]*"(\]|\})', '$1$2')
+  $topology = [regex]::Replace($topology, '\|[^|\r\n]*\|', '||')
+  return [regex]::Replace($topology, '\s+', '')
+}
+
 function Assert-TaskSetResetContract {
   $policyDocuments = @(
     @{ Name = 'root Skill'; Text = $skillRootDocument },
@@ -231,12 +243,44 @@ foreach ($row in @('Single long (?:conversation|task)', 'Subagents?', '(?:This S
   Assert-Contains $readme "(?im)^\|\s*$row\s*\|" 'English README must include a three-way Markdown comparison table'
 }
 
+$englishMermaid = @(Get-MermaidBlocks -Text $readme)
+$chineseMermaid = @(Get-MermaidBlocks -Text $readmeZh)
+if ($englishMermaid.Count -ne 4 -or $chineseMermaid.Count -ne 4) {
+  throw 'Both public READMEs must contain exactly four detailed workflow diagrams'
+}
+for ($diagramIndex = 0; $diagramIndex -lt 4; $diagramIndex++) {
+  $englishNodeIds = @([regex]::Matches($englishMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?![A-Za-z0-9_])') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  $chineseNodeIds = @([regex]::Matches($chineseMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?![A-Za-z0-9_])') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  $englishDeclaredNodeIds = @([regex]::Matches($englishMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  $chineseDeclaredNodeIds = @([regex]::Matches($chineseMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+  if (($englishNodeIds -join ',') -cne ($englishDeclaredNodeIds -join ',') -or ($chineseNodeIds -join ',') -cne ($chineseDeclaredNodeIds -join ',')) {
+    throw "Workflow diagram $($diagramIndex + 1) must not rely on implicit or cross-diagram nodes"
+  }
+  $englishNodeCount = @([regex]::Matches($englishMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique).Count
+  $chineseNodeCount = @([regex]::Matches($chineseMermaid[$diagramIndex], '(?<![A-Za-z0-9_])[A-Z]\d+(?=\s*(?:\[|\{))') | ForEach-Object { $_.Value } | Sort-Object -Unique).Count
+  if ($englishNodeCount -lt 5 -or $englishNodeCount -gt 15 -or $chineseNodeCount -ne $englishNodeCount) {
+    throw "Workflow diagram $($diagramIndex + 1) must keep one shared readable 5-15-node topology"
+  }
+  if ((Get-MermaidTopology -Block $englishMermaid[$diagramIndex]) -cne (Get-MermaidTopology -Block $chineseMermaid[$diagramIndex])) {
+    throw "English and Chinese workflow diagram $($diagramIndex + 1) must use the same node and edge topology"
+  }
+}
+foreach ($expectation in @(
+  '(?is)needs-project-add.{0,1200}AGENTS.{0,1200}codebase-memory.{0,1200}controller',
+  '(?is)FIFO.{0,1000}parallel.{0,1000}model.{0,1200}approval.{0,1200}receipt.{0,600}native-callback.{0,600}foreground.{0,1200}accept',
+  '(?is)ExperienceRead.{0,1200}accepted success.{0,1200}deterministic failure.{0,1200}repair.{0,800}rebaseline.{0,800}convergence-failed',
+  '(?is)Plan.{0,600}planHash.{0,600}Apply.{0,1200}standby.{0,1200}archive.{0,1200}handoff.{0,1200}seal.{0,800}unfreeze'
+)) {
+  Assert-Contains ($englishMermaid -join "`n") $expectation 'English workflow diagrams must expose every major public workflow'
+}
+
 Assert-InOrder $readme @(
   '## Problems this Skill solves',
   '## What you get',
+  '## Core workflows',
   '## Quick start',
   '## Git URL onboarding',
-  '## How it works',
+  '## Boundaries',
   '## Requirements and diagnostics',
   '## Permissions and local data',
   '## Troubleshooting',
@@ -254,9 +298,10 @@ if ($readme -match '(?m)^## What it creates\s*$') { throw 'English README must u
 
 $zhPainHeading = [regex]::Unescape('## \u5b83\u89e3\u51b3\u4ec0\u4e48\u75db\u70b9')
 $zhGetHeading = [regex]::Unescape('## \u4f60\u4f1a\u5f97\u5230\u4ec0\u4e48')
+$zhCoreHeading = [regex]::Unescape('## \u6838\u5fc3\u6d41\u7a0b')
 $zhQuickStartHeading = [regex]::Unescape('## \u5feb\u901f\u5f00\u59cb')
 $zhGitHeading = [regex]::Unescape('## Git URL \u63a5\u5165')
-$zhHowHeading = [regex]::Unescape('## \u5de5\u4f5c\u65b9\u5f0f')
+$zhHowHeading = [regex]::Unescape('## \u80fd\u529b\u8fb9\u754c')
 $zhRequirementsHeading = [regex]::Unescape('## \u73af\u5883\u8981\u6c42\u4e0e\u53ea\u8bfb\u8bca\u65ad')
 $zhPermissionsHeading = [regex]::Unescape('## \u6743\u9650\u4e0e\u672c\u5730\u6570\u636e')
 $zhTroubleshootingHeading = [regex]::Unescape('## \u5e38\u89c1\u95ee\u9898')
@@ -284,6 +329,7 @@ foreach ($row in @('\u5355\u4e00\u957f\u4f1a\u8bdd', 'Subagent(?:s)?', '\u672c S
 Assert-InOrder $readmeZh @(
   $zhPainHeading,
   $zhGetHeading,
+  $zhCoreHeading,
   $zhQuickStartHeading,
   $zhGitHeading,
   $zhHowHeading,
@@ -685,7 +731,8 @@ Assert-Contains $preflight '(?is)--version.{0,1200}18\.0\.0.{0,1200}node>=18\.0\
   'Preflight must execute Node.js and enforce the documented minimum version'
 
 foreach ($document in @($readme, $readmeZh)) {
-  if (($document -split "`r?`n").Count -gt 260) { throw 'Public README must remain a concise project overview (260 lines maximum)' }
+  $proseOnly = [regex]::Replace($document, '(?ms)^```mermaid\s*\r?\n.*?^```\s*$', '')
+  if (($proseOnly -split "`r?`n").Count -gt 260) { throw 'Public README prose must remain a concise project overview (260 lines maximum, diagrams excluded)' }
   if ($document -match '(?m)^## (?:Bounded convergence and reusable experience|Four-quadrant request intake|Long-lived controller memory|Results and recovery|Verification|\u6709\u754c\u6536\u655b\u4e0e\u7ecf\u9a8c\u590d\u7528|\u56db\u8c61\u9650\u8bf7\u6c42\u534f\u8bae|\u957f\u671f\u4e2d\u63a7\u8bb0\u5fc6|\u7ed3\u679c\u4e0e\u6062\u590d|\u9a8c\u8bc1)\s*$') {
     throw 'Internal controller and maintainer details must not return to the public README'
   }

@@ -41,22 +41,116 @@ Project entry tasks may still use subagents internally; the two approaches are c
 
 ## What you get
 
-```mermaid
-flowchart LR
-    U["User"] --> A["Project A entry task"]
-    U --> B["Project B entry task"]
-    U -.->|optional cross-project work| C["Controller"]
-    C --> A
-    C --> B
-    A --> RA["Repository A + index"]
-    B --> RB["Repository B + index"]
-```
-
 - For each source: one verified saved-project binding, one reusable local entry task, and one `codebase-memory` index.
 - Optionally: one controller directory and controller task outside every business repository.
 - Optionally: durable result return when the plugin Stop Hook and Node.js are available; automatic wake additionally requires validated rule, worker, and automation capabilities.
 
 The Skill cannot create a saved Codex project. Add each exact directory in Codex Desktop first; the Skill verifies and uses that identity.
+
+## Core workflows
+
+The four flows below cover the public lifecycle. Exact payloads, hashes, reason codes, and recovery commands remain in the [controller runtime reference](./references/controller-runtime.md).
+
+### 1. Onboard or reuse each repository
+
+```mermaid
+flowchart TD
+    O1["Local paths or Git URLs"] --> O2["Load or confirm the saved index mode, then parse inputs and run read-only preflight"]
+    O2 --> O3{"Source type?"}
+    O3 -->|Local directory| O7{"One exact saved project on this host?"}
+    O3 -->|Git URL| O4["Clone only into a new cloneRoot child"]
+    O4 --> O5["Return needs-project-add"]
+    O5 --> O6["User saves the exact clone and reruns"]
+    O6 --> O7
+    O7 -->|No or ambiguous| O8["Block with a precise next action"]
+    O7 -->|Yes| O9["Read AGENTS and verify root, branch, HEAD, and dirty state"]
+    O9 --> O10["Create or reuse one project-bound entry task"]
+    O10 --> O11["Build or refresh the selected codebase-memory index"]
+    O11 --> O12["Verify index root and revision"]
+    O12 --> O13["Repository lane ready for direct work"]
+    O13 -.->|Optional cross-project work| O14["Verify or initialize an external controller and register this entry"]
+    O14 -.->|Controller unavailable or creation result unknown| O15["Keep ready repositories; report pending registration or reconcile evidence without retrying"]
+```
+
+Saved projects stay user-owned. The Skill creates neither projectless tasks nor worktrees, and the optional controller must remain outside every business repository.
+
+### 2. Coordinate, dispatch, and accept cross-project work
+
+```mermaid
+flowchart TD
+    D1["Cross-project request"] --> D2["Four-quadrant intake; freeze objective, contract, scope, and acceptance"]
+    D2 --> D3["Queue work by project"]
+    D3 -->|Same project runs one active task in FIFO order| D4
+    D3 -->|Independent projects run in parallel| D4
+    D4["Seal the dispatch and select the model class by complexity and risk"] --> D5["Send only to the verified project entry task"]
+    D5 -.->|Timeout or empty delivery| D15["Stop or hold only this lane; never resend blindly or expand authority"]
+    D5 -->|Delivered| D6["Re-read AGENTS and verify root, baseline, and scope"]
+    D6 --> D7{"Runtime approval required?"}
+    D7 -->|Yes| D8["Only this project waits; other lanes continue"]
+    D7 -->|No| D9["Implement and test inside the repository"]
+    D8 -->|Approved| D9
+    D8 -.->|Declined| D15
+    D9 --> D10{"Available return channel?"}
+    D10 -->|Hook receipt, with optional wake| D11["Controller re-reads branch, HEAD, diff, tests, and contract; wake is not acceptance"]
+    D10 -->|native-callback| D11
+    D10 -->|foreground| D11
+    D11 --> D12{"Result and evidence disposition?"}
+    D12 -->|accepted success| D13["Record success, release the lease, and start the next FIFO item"]
+    D12 -->|Eligible business or review failure| D14["Keep the lease and enter the bounded convergence flow below"]
+    D12 -->|Cancelled, declined, or non-retryable blocked| D15
+```
+
+The controller writes governance state only. Repository edits and tests remain in the exact project entry task; a callback or receipt only signals that evidence is ready to inspect.
+
+### 3. Reuse evidence-backed experience and stop retry loops
+
+```mermaid
+flowchart TD
+    E1["Canonical goal logs and curated evidence-bound imports"] --> E2["ExperienceRead verifies the bounded experience index"]
+    E2 --> E3["Match problem, strategy family, and material conditions"]
+    E3 --> E4{"Prior verified outcome?"}
+    E4 -->|accepted success| E5["Reuse the proven strategy, then recheck current readiness"]
+    E4 -->|deterministic failure: reject the same mechanism| E6["Reserve the next allowed strategy"]
+    E4 -->|No match or proved material change| E6
+    E5 --> E7["Execute, test, and collect current evidence"]
+    E6 --> E7
+    E7 --> E8{"Reviewed outcome?"}
+    E8 -->|accepted success| E9["Store reusable success in the bounded index and close the lane"]
+    E8 -->|deterministic failure| E10["Store the hard failure in the bounded index"]
+    E8 -->|Transient, environment, superseded, cancelled, or authorization result| E11["Audit only; do not blacklist; cancellation or declined authorization stops the lane"]
+    E10 --> E12{"Which business attempt failed?"}
+    E11 -.->|Eligible environment change or supersession| E12
+    E12 -->|Initial| E13["Run one comprehensive repair"]
+    E12 -->|Repair| E14["Run one whole-goal rebaseline"]
+    E12 -->|Rebaseline| E15["convergence-failed: stop for a user decision"]
+    E13 --> E2
+    E14 --> E2
+```
+
+This is evidence reuse, not automatic learning. A changed material condition needs direct canonical evidence; renaming a task, opening a new conversation, or changing an unproved hash cannot erase a known deterministic failure. Only a zero-repository-write transport, tool-bootstrap, or payload-parse failure may receive one same-attempt preflight replay.
+
+### 4. Refresh a long-lived controller task set
+
+```mermaid
+flowchart TD
+    R1["Explicit reset request from an external coordinator"] --> R2{"Exact generated v3, task APIs, Node.js, single roots, and quiet state?"}
+    R2 -->|No| R3["Block without changing or deleting tasks"]
+    R2 -->|Yes| R4["Read-only Plan returns planHash"]
+    R4 --> R5["Separately authorized Apply uses the exact planHash"]
+    R5 --> R6["Re-read complete history, quiet state, and active work; prepare the runtime fence"]
+    R6 --> R7["Create bootstrap-only standby tasks exactly once; projects first, controller last"]
+    R7 --> R8["Read, sanitize, bound, and hash every old task history"]
+    R8 --> R9["Archive old project tasks, then the old controller, with readback"]
+    R9 --> R10{"Did archived history change?"}
+    R10 -->|Yes| R11["Re-read and rebuild the complete final handoff"]
+    R10 -->|No| R12["Persist and send the bounded handoff; verify standby acknowledgements"]
+    R11 --> R12
+    R12 --> R13["Atomically switch the whole task set; commit and read back runtime state"]
+    R13 --> R14["Seal, recover, and unfreeze; retain the same heartbeat"]
+    R14 --> R15["New tasks inherit canonical state; old tasks stay archived; coordinator archives last"]
+```
+
+Apply is forward-only. An interruption keeps the set frozen and resumes the same operation; it never rolls back, deletes tasks, mutates canonical work records, or retries a task creation whose result is unknown.
 
 ## Quick start
 
@@ -124,7 +218,6 @@ When a controller and its project entry tasks need fresh conversations, exact ge
 ```text
 resetControllerTasks: true
 Action: Plan
-
 # Review the returned planHash, then send the same request with:
 Action: Apply
 planHash: <returned planHash>
@@ -151,17 +244,9 @@ indexMode: full
 
 The Skill clones only into a new child of `cloneRoot` and then returns `needs-project-add`. Save the exact clone as a Codex project and rerun the same request. The existing clone is reused only after its root, credential-free origin, and requested branch or ref are verified.
 
-## How it works
-
-1. Match each source to one exact saved project on the current host.
-2. Verify its task identity, root, Git baseline, dirty state, and `codebase-memory` index.
-3. Keep repository changes and tests in that repository's entry task.
-4. Use the optional controller only for shared contracts, sequencing, dispatch, and end-to-end acceptance.
-5. Validate returned branch, HEAD, diff, tests, contract impact, and remaining risk before accepting a result.
+## Boundaries
 
 This is **workflow isolation**, not a security sandbox. It does not change filesystem permissions, and manually mixing repositories in one task can reintroduce context pollution.
-
-Detailed queue, recovery, convergence, receipt, and controller-state contracts live in [the controller runtime reference](./references/controller-runtime.md), not in this project overview.
 
 ## Inputs
 
