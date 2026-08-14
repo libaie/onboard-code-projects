@@ -213,8 +213,8 @@ $englishPainHeading = '## Problems this Skill solves'
 $englishPainPosition = $readme.IndexOf($englishPainHeading, [StringComparison]::Ordinal)
 if ($englishPainPosition -lt 0) { throw 'English README must retain the Problems section' }
 $englishPreamble = $readme.Substring(0, $englishPainPosition)
-Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*Windows-first)(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*(?:multi-repository|multi-repo))(?=[^\r\n]*workflow[- ]isolation)(?=[^\r\n]*\bSkill\b)[^\r\n]+$' `
-  'English README first screen must state the Windows-first Codex Desktop multi-repository workflow-isolation Skill category'
+Assert-Contains $englishPreamble '(?im)^(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*(?:multi-repository|multi-repo))(?=[^\r\n]*context pollution)(?=[^\r\n]*workflow[- ]isolation)(?=[^\r\n]*\bSkill\b)[^\r\n]+$' `
+  'English README first screen must lead with the Codex Desktop multi-repository context-pollution problem and Skill category'
 Assert-Contains $englishPreamble '(?i)\b(?:two or more|2\+)\s+(?:related\s+)?repositories\b' `
   'English README first screen must state the two-or-more-repository trigger'
 Assert-Contains $englishPreamble '(?is)(?:exact-root|exact root).{0,160}verified.{0,160}project-bound entry tasks.{0,300}codebase-memory.{0,300}optional controller' `
@@ -262,8 +262,8 @@ $zhDocsHeading = [regex]::Unescape('## \u6587\u6863')
 $zhPainPosition = $readmeZh.IndexOf($zhPainHeading, [StringComparison]::Ordinal)
 if ($zhPainPosition -lt 0) { throw 'Chinese README must retain the pain-point section' }
 $zhPreamble = $readmeZh.Substring(0, $zhPainPosition)
-Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*(?:Windows-first|Windows[^\r\n]{0,20}\u4f18\u5148))(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*\u591a\u4ed3\u5e93)(?=[^\r\n]*\u5de5\u4f5c\u6d41\u9694\u79bb)(?=[^\r\n]*Skill)[^\r\n]+$' `
-  'Chinese README first screen must state the Windows-first Codex Desktop multi-repository workflow-isolation Skill category'
+Assert-Contains $zhPreamble '(?im)^(?=[^\r\n]*Codex Desktop)(?=[^\r\n]*\u591a\u4ed3\u5e93)(?=[^\r\n]*\u4e0a\u4e0b\u6587\u6c61\u67d3)(?=[^\r\n]*\u5de5\u4f5c\u6d41\u9694\u79bb)(?=[^\r\n]*Skill)[^\r\n]+$' `
+  'Chinese README first screen must lead with the Codex Desktop multi-repository context-pollution problem and Skill category'
 Assert-Contains $zhPreamble '(?is)(?:2\s*\+|2\s*\u4e2a\u53ca\u4ee5\u4e0a|\u4e24\u4e2a\u53ca\u4ee5\u4e0a).{0,20}\u4ed3\u5e93' `
   'Chinese README first screen must state the two-or-more-repository trigger'
 Assert-Contains $zhPreamble '(?is)\u7cbe\u786e\u6839\u76ee\u5f55.{0,160}(?:\u5df2\u6838\u9a8c|\u7ecf\u8fc7\u6838\u9a8c).{0,160}\u9879\u76ee(?:\u7ed1\u5b9a)?\u5165\u53e3\u4efb\u52a1.{0,300}codebase-memory.{0,300}\u53ef\u9009\u4e2d\u63a7' `

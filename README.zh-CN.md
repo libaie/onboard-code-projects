@@ -8,14 +8,12 @@
 
 开源仓库：[libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-onboard-code-projects 是 Windows-first 的 Codex Desktop 多仓库工作流隔离 Skill。
+`onboard-code-projects` 是减少 Codex Desktop 多仓库上下文污染的工作流隔离 Skill：为每个仓库建立独立、经过核验且可复用的项目任务和 `codebase-memory` 索引，并通过可选中控协调跨项目工作。
 
 - **适用于：** 工作横跨两个及以上仓库。
 - **你会得到：** 绑定到精确根目录、经过核验的项目入口任务，每个仓库对应一个 `codebase-memory` 索引，以及负责跨项目协作的可选中控。
 - **它不会：** 创建或保存 Codex 项目，也不会代替用户授权或批准权限。
 - **它不是：** 安全沙箱，也不会部署软件。
-
-它解决的核心问题是：多个仓库放在同一个长期会话里，会混淆项目指令、分支、权限、证据和修改范围。
 
 > **状态：预览版。** 当前支持的发布面是 Windows 和 Codex Desktop，其他平台尚未完成发布级端到端验证。
 

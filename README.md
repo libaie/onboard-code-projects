@@ -8,14 +8,12 @@
 
 Repository: [libaie/onboard-code-projects](https://github.com/libaie/onboard-code-projects)
 
-onboard-code-projects is a Windows-first Codex Desktop multi-repository workflow-isolation Skill.
+`onboard-code-projects` is the Codex Desktop multi-repository workflow-isolation Skill that reduces context pollution by giving each repository its own verified, reusable project task and `codebase-memory` index, with an optional controller for cross-project coordination.
 
 - **Use when:** work crosses two or more related repositories.
 - **You get:** exact-root, verified project-bound entry tasks, a `codebase-memory` index for each repository, and an optional controller for cross-project coordination.
 - **It does not:** create saved Codex projects or approve permissions.
 - **It is not:** a security sandbox, and it does not deploy software.
-
-This reduces the risk of repository instructions, branches, permissions, evidence, and edits being mixed in one long conversation.
 
 > **Preview:** Windows and Codex Desktop are the supported release surface. Other platforms are not yet release-tested end to end.
 
